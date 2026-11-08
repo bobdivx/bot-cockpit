@@ -1,0 +1,6 @@
+# FIXTURE SYNTHÉTIQUE — pas un export de compte. Ne représente aucun usage réel.
+Date;Jetons entrée;Jetons cache;Jetons sortie;Total;Coût;Modèle;Type;Automation
+01/11/2026 09:00;1200;300;400;1900;1,25;fixture-synthetique-a;chat;auto-fixture-1
+02/11/2026 09:15;"2 000";0;500;2500;Included;fixture-synthetique-a;routine;auto-fixture-1
+03/11/2026;100;0;50;150;-;fixture-synthetique-b;outil;
+04/11/2026 18:40;10;0;10;20;0,00;fixture-synthetique-b;chat;auto-fixture-2

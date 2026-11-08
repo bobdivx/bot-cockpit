@@ -1,0 +1,10 @@
+{
+  "name": "bot-cockpit",
+  "runtime": "docker-compose",
+  "composeFile": "docker-compose.yml",
+  "dockerfile": "Dockerfile",
+  "port": 8741,
+  "healthPath": "/api/health",
+  "persistentPaths": ["/data"],
+  "notes": "Indice local. Le connecteur DevForge n’a pas été joint : le contrat réel est Docker Compose, le volume /data et GET /api/health. Ne pas utiliser Vercel."
+}

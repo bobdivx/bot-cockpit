@@ -1,0 +1,22 @@
+# Bot Cockpit — unité de déploiement DevForge / Docker Compose.
+# Ne pas déployer sur Vercel. Le volume conserve la base SQLite.
+services:
+  cockpit:
+    build: .
+    ports:
+      - "8741:8741"
+    environment:
+      NODE_ENV: production
+      PORT: "8741"
+      BOT_COCKPIT_DATA: /data/cockpit.sqlite
+      BOT_COCKPIT_SETUP_TOKEN: ${BOT_COCKPIT_SETUP_TOKEN:-}
+      BOT_COCKPIT_ALLOW_OPEN_SETUP: ${BOT_COCKPIT_ALLOW_OPEN_SETUP:-0}
+      BOT_COCKPIT_WEBHOOKS: ${BOT_COCKPIT_WEBHOOKS:-{}}
+      BOT_COCKPIT_WEBHOOK_SECRET: ${BOT_COCKPIT_WEBHOOK_SECRET:-}
+      BOT_COCKPIT_WEBHOOK_ALLOW_PRIVATE: ${BOT_COCKPIT_WEBHOOK_ALLOW_PRIVATE:-0}
+      BOT_COCKPIT_COOKIE_SECURE: ${BOT_COCKPIT_COOKIE_SECURE:-0}
+    volumes:
+      - cockpit-data:/data
+    restart: unless-stopped
+volumes:
+  cockpit-data:
