@@ -4,7 +4,7 @@ export const APP_VERSION = '0.1.0';
 export const BOT_STATUSES = ['offline', 'idle', 'working', 'away', 'blocked'] as const;
 export type BotStatus = (typeof BOT_STATUSES)[number];
 
-export const ACCENTS = ['#b85a2a', '#1f6f64', '#3d5a8a', '#8a4b6a', '#6b5b2a', '#3f5c4b'] as const;
+export const ACCENTS = ['#7ec8e3', '#c4b2ff', '#ff8f8f', '#ffb067', '#8eb7ff', '#8fd4c8'] as const;
 
 export const ROOM_KINDS = ['revue', 'atelier', 'salon', 'labo', 'diffusion'] as const;
 export type RoomKind = (typeof ROOM_KINDS)[number];

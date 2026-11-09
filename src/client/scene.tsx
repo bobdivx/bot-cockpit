@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Bot, Room, Signal, Team } from '../shared/types';
 import type { CampusView } from './campus';
-import { STATUS_LABEL, signalLabel } from './format';
+
+export type SceneApi = {
+  resetCamera: () => void;
+  focusRoom: (id: string) => void;
+  enterSelected: () => void;
+};
 
 export function OfficeScene({
   rooms,
@@ -11,6 +16,7 @@ export function OfficeScene({
   demo,
   selected,
   onSelect,
+  onReady,
 }: {
   rooms: Room[];
   teams: Team[];
@@ -19,6 +25,7 @@ export function OfficeScene({
   demo: boolean;
   selected: string | null;
   onSelect: (id: string) => void;
+  onReady?: (api: SceneApi | null) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<CampusView | null>(null);
@@ -26,6 +33,8 @@ export function OfficeScene({
   selectRef.current = onSelect;
   const snap = useRef({ rooms, teams, bots, signals, demo, selected });
   snap.current = { rooms, teams, bots, signals, demo, selected };
+  const readyRef = useRef(onReady);
+  readyRef.current = onReady;
   const [webgl, setWebgl] = useState(true);
   const [reduced, setReduced] = useState(false);
 
@@ -50,9 +59,15 @@ export function OfficeScene({
       const current = snap.current;
       campus.setSnapshot(current);
       campus.setSelected(current.selected);
+      readyRef.current?.({
+        resetCamera: () => campus?.resetCamera(),
+        focusRoom: (id) => campus?.focusRoom(id),
+        enterSelected: () => campus?.enterSelected(),
+      });
     });
     return () => {
       cancelled = true;
+      readyRef.current?.(null);
       campus?.dispose();
       view.current = null;
     };
@@ -92,8 +107,6 @@ export function OfficeScene({
     : demo
       ? 'Trajet fictif entre les fiches de démonstration. Les poses suivent les statuts.'
       : 'Le mouvement suit le statut observé. Un signal ancien fige le personnage.';
-  const selectedBot = bots.find((bot) => bot.id === selected) ?? null;
-  const activeRoom = selectedBot?.roomId ?? null;
 
   return (
     <div class="scene-stage" role="application" aria-label="Bureau isométrique">
@@ -103,49 +116,7 @@ export function OfficeScene({
           WebGL est indisponible. La liste compacte reste utilisable.
         </p>
       )}
-      <nav class="floor-nav" aria-label="Salles">
-        <button
-          type="button"
-          class={!activeRoom ? 'on' : ''}
-          onClick={() => view.current?.resetCamera()}
-        >
-          <b>Tout le plateau</b>
-          <small>
-            {rooms.length} salle{rooms.length > 1 ? 's' : ''}
-          </small>
-        </button>
-        {rooms.map((room) => {
-          const team = teams.find((item) => item.id === room.teamId);
-          return (
-            <button
-              key={room.id}
-              type="button"
-              class={activeRoom === room.id ? 'on' : ''}
-              style={`--team:${team?.accent ?? '#8eb7ff'}`}
-              onClick={() => view.current?.focusRoom(room.id)}
-            >
-              <b>{room.name}</b>
-              <small>{team?.name ?? 'Sans équipe'}</small>
-            </button>
-          );
-        })}
-      </nav>
-      <div class="scene-hud">
-        <p class="scene-note">
-          {selectedBot
-            ? `${selectedBot.name} · ${STATUS_LABEL[selectedBot.status]} · ${signalLabel(selectedBot)}`
-            : 'Sélectionnez un personnage pour lire son dernier signal.'}
-          <span>{note}</span>
-        </p>
-        <div class="chips scene-actions">
-          <button class="btn small" type="button" onClick={() => view.current?.resetCamera()}>
-            Recadrer
-          </button>
-          <button class="btn small" type="button" onClick={() => view.current?.enterSelected()}>
-            Approcher
-          </button>
-        </div>
-      </div>
+      <p class="scene-note motion-note">{note}</p>
     </div>
   );
 }

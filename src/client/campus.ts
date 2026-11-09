@@ -282,10 +282,10 @@ export class CampusView {
       minY = Math.min(minY, probe.y);
       maxY = Math.max(maxY, probe.y);
     }
-    const allowX0 = -0.56;
-    const allowX1 = 0.94;
-    const allowY0 = -0.62;
-    const allowY1 = 0.84;
+    const allowX0 = -0.5;
+    const allowX1 = 0.46;
+    const allowY0 = -0.46;
+    const allowY1 = 0.72;
     const zoom = THREE.MathUtils.clamp(
       Math.min(
         (allowX1 - allowX0) / Math.max(0.001, maxX - minX),

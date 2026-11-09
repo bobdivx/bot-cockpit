@@ -14,14 +14,20 @@ export function OrgTree({
   if (teams.length === 0 && bots.length === 0) {
     return (
       <div class="org">
-        <p class="org-root">Atelier</p>
+        <p class="org-root">
+          <span class="kicker">Atelier</span>
+          <strong>Fiches</strong>
+        </p>
         <p class="meta">Aucune fiche. L’arbre reste vide tant qu’une équipe n’est pas créée.</p>
       </div>
     );
   }
   return (
     <div class="org">
-      <p class="org-root">Atelier</p>
+      <p class="org-root">
+        <span class="kicker">Atelier</span>
+        <strong>Fiches</strong>
+      </p>
       <svg class="org-links" viewBox="0 0 1000 70" aria-hidden="true">
         {teams.map((team, index) => {
           const x = teams.length === 1 ? 500 : 80 + (index * 840) / Math.max(teams.length - 1, 1);

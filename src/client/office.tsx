@@ -1,10 +1,20 @@
-import { useEffect, useState } from 'preact/hooks';
-import type { Bot, BotStatus, PackSummary, RoomKind, Workspace } from '../shared/types';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import type {
+  Bot,
+  BotStatus,
+  PackSummary,
+  Room,
+  RoomKind,
+  Signal,
+  Team,
+  UsageSummary,
+  Workspace,
+} from '../shared/types';
 import { ACCENTS } from '../shared/types';
 import { api } from './api';
-import { KIND_LABEL, STATUS_LABEL, signalLabel } from './format';
+import { formatNumber, KIND_LABEL, STATUS_LABEL, signalLabel } from './format';
 import { OrgTree } from './org';
-import { OfficeScene } from './scene';
+import { OfficeScene, type SceneApi } from './scene';
 import { Badge, Empty, Field } from './ui';
 
 const STATUSES: BotStatus[] = ['offline', 'idle', 'working', 'away', 'blocked'];
@@ -13,10 +23,12 @@ const KINDS: RoomKind[] = ['revue', 'atelier', 'salon', 'labo', 'diffusion'];
 export function Office({
   data,
   reload,
+  email,
   initialId = null,
 }: {
   data: Workspace;
   reload: () => Promise<void>;
+  email: string;
   initialId?: string | null;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(initialId);
@@ -25,6 +37,8 @@ export function Office({
   const [error, setError] = useState('');
   const [view, setView] = useState<'bureau' | 'arbre'>('bureau');
   const [adder, setAdder] = useState(false);
+  const scene = useRef<SceneApi | null>(null);
+  const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [team, setTeam] = useState<{ name: string; mission: string; accent: string }>({
     name: '',
     mission: '',
@@ -46,7 +60,15 @@ export function Office({
     (item) => activeTeams.some((teamItem) => teamItem.id === item.teamId) || !item.teamId,
   );
   const selected = data.bots.find((item) => item.id === selectedId) ?? null;
+  const selectedRoom = rooms.find((item) => item.id === selected?.roomId) ?? null;
+  const roster = selectedRoom ? bots.filter((item) => item.roomId === selectedRoom.id) : bots;
   const unlinked = data.signals.filter((signal) => !signal.linked);
+
+  useEffect(() => {
+    void api<UsageSummary>('/api/usage/summary')
+      .then(setSummary)
+      .catch(() => setSummary(null));
+  }, [data.imports.length, data.settings.demoMode]);
 
   useEffect(() => {
     void api<PackSummary[]>('/api/packs')
@@ -74,7 +96,7 @@ export function Office({
   }
 
   return (
-    <div class="office-screen">
+    <div class={`office-screen${selected ? ' has-selection' : ''}`}>
       {view === 'bureau' ? (
         <OfficeScene
           rooms={rooms}
@@ -84,6 +106,9 @@ export function Office({
           demo={data.settings.demoMode}
           selected={selectedId}
           onSelect={setSelectedId}
+          onReady={(api) => {
+            scene.current = api;
+          }}
         />
       ) : (
         <OrgTree teams={activeTeams} bots={bots} onSelect={setSelectedId} />
@@ -106,16 +131,85 @@ export function Office({
         <button class="btn small" type="button" onClick={() => setAdder(true)}>
           Ajouter
         </button>
+        {view === 'bureau' && (
+          <>
+            <button
+              class="btn small"
+              type="button"
+              onClick={() => {
+                setSelectedId(null);
+                scene.current?.resetCamera();
+              }}
+            >
+              Recadrer
+            </button>
+            <button class="btn small" type="button" onClick={() => scene.current?.enterSelected()}>
+              Approcher
+            </button>
+          </>
+        )}
       </div>
-      {selected && (
-        <aside class="float-card" aria-label="Fiche sélectionnée">
+      {view === 'bureau' && (
+        <FloorDock
+          rooms={rooms}
+          teams={data.teams}
+          bots={bots}
+          activeRoom={selected?.roomId ?? null}
+          onOverview={() => {
+            setSelectedId(null);
+            scene.current?.resetCamera();
+          }}
+          onRoom={(id) => scene.current?.focusRoom(id)}
+          onStatus={(id, status) =>
+            void run(() =>
+              api(`/api/bots/${id}/status`, {
+                method: 'POST',
+                body: JSON.stringify({ status, note: '' }),
+              }),
+            )
+          }
+        />
+      )}
+      {view === 'bureau' && <ActivityDock email={email} signals={data.signals} summary={summary} />}
+      {view === 'bureau' && (
+        <aside class="float-card" aria-label="Fiches du plateau">
           {error && <div class="error">{error}</div>}
-          <BotCard
-            bot={selected}
-            data={data}
-            onClose={() => setSelectedId(null)}
-            onChange={(action) => run(action)}
-          />
+          <p class="kicker">{selectedRoom ? selectedRoom.name : 'Plateau'}</p>
+          <div class="roster">
+            {roster.length === 0 && <p class="meta">Aucune fiche dans cette vue.</p>}
+            {roster.map((bot) => {
+              const team = data.teams.find((item) => item.id === bot.teamId);
+              return (
+                <button
+                  key={bot.id}
+                  type="button"
+                  class={`roster-row ${selectedId === bot.id ? 'on' : ''}`}
+                  style={`--team:${team?.accent ?? '#8eb7ff'}`}
+                  onClick={() => setSelectedId(bot.id)}
+                >
+                  <i />
+                  <span>
+                    <b>{bot.name}</b>
+                    <small>
+                      {STATUS_LABEL[bot.status]} · {signalLabel(bot)}
+                    </small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <p class="meta">Progression : non disponible</p>
+          {selected && (
+            <details>
+              <summary>Modifier la fiche</summary>
+              <BotCard
+                bot={selected}
+                data={data}
+                onClose={() => setSelectedId(null)}
+                onChange={(action) => run(action)}
+              />
+            </details>
+          )}
         </aside>
       )}
       {adder && (
@@ -372,6 +466,129 @@ export function Office({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function FloorDock({
+  rooms,
+  teams,
+  bots,
+  activeRoom,
+  onOverview,
+  onRoom,
+  onStatus,
+}: {
+  rooms: Room[];
+  teams: Team[];
+  bots: Bot[];
+  activeRoom: string | null;
+  onOverview: () => void;
+  onRoom: (id: string) => void;
+  onStatus: (id: string, status: BotStatus) => void;
+}) {
+  const waiting = bots.filter((bot) => bot.status === 'blocked' || (bot.stale && !bot.quiet));
+  return (
+    <aside class="dock-left" aria-label="Salles et attentes">
+      <p class="kicker dock-title">Salles</p>
+      <button class={`room ${activeRoom ? '' : 'on'}`} type="button" onClick={onOverview}>
+        <b>Tout le plateau</b>
+        <small>
+          {rooms.length} salle{rooms.length > 1 ? 's' : ''}
+        </small>
+      </button>
+      {rooms.map((room) => {
+        const team = teams.find((item) => item.id === room.teamId);
+        return (
+          <button
+            key={room.id}
+            class={`room ${activeRoom === room.id ? 'on' : ''}`}
+            type="button"
+            style={`--team:${team?.accent ?? '#8eb7ff'}`}
+            onClick={() => onRoom(room.id)}
+          >
+            <b>{room.name}</b>
+            <small>{team?.name ?? 'Sans équipe'}</small>
+          </button>
+        );
+      })}
+      <p class="kicker dock-title">En attente de moi</p>
+      {waiting.length === 0 && <p class="meta">Aucune fiche bloquée ni signal ancien.</p>}
+      {waiting.map((bot) => {
+        const team = teams.find((item) => item.id === bot.teamId);
+        return (
+          <div key={bot.id} class="wait-row" style={`--team:${team?.accent ?? '#ff8f8f'}`}>
+            <i />
+            <div>
+              <b>{bot.name}</b>
+              <small>
+                {STATUS_LABEL[bot.status]} · {signalLabel(bot)}
+              </small>
+            </div>
+            <div class="btn-row">
+              <button
+                class="btn small"
+                type="button"
+                disabled={bot.isDemo}
+                onClick={() => onStatus(bot.id, 'idle')}
+              >
+                Disponible
+              </button>
+              <button
+                class="btn small"
+                type="button"
+                disabled={bot.isDemo}
+                onClick={() => onStatus(bot.id, 'working')}
+              >
+                Au travail
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </aside>
+  );
+}
+
+function ActivityDock({
+  email,
+  signals,
+  summary,
+}: {
+  email: string;
+  signals: Signal[];
+  summary: UsageSummary | null;
+}) {
+  const handle = email.split('@')[0] || 'atelier';
+  const lines = [...signals].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, 6);
+  const tokens = summary?.totals.totalTokens ?? null;
+  return (
+    <div class="dock-bottom">
+      <section class="log-card" aria-label="Activité">
+        <p class="kicker">Activité</p>
+        <pre>
+          {`~ /${handle} $`}
+          {lines.length === 0
+            ? '\naucun événement enregistré'
+            : lines
+                .map((signal) => {
+                  const when = signal.occurredAt.slice(11, 16);
+                  const who = signal.reportedBotKey || 'signal';
+                  const text = (signal.detail || signal.name).replace(/\s+/g, ' ');
+                  return `\n${when}  ${who}  ${text}`;
+                })
+                .join('')}
+        </pre>
+      </section>
+      <section class="metric-card" aria-label="Usage importé">
+        <p class="kicker">Usage importé</p>
+        <strong>{tokens == null ? 'Non disponible' : formatNumber(tokens)}</strong>
+        <p class="meta">
+          {tokens == null
+            ? 'Aucun total de jetons dans les CSV.'
+            : 'Jetons des lignes importées. Ce n’est pas un quota.'}
+        </p>
+      </section>
     </div>
   );
 }

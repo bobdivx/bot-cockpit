@@ -61,31 +61,25 @@ export function Shell({ email, onLogout }: { email: string; onLogout: () => void
     if (tick > 0) void reload();
   }, [tick]);
 
-  const titles: Record<Route, string> = {
-    bureau: 'Bureau',
-    liste: 'Liste',
-    usage: 'Usage observé',
-    liens: 'Liens MCP',
-    demandes: 'Demandes',
-    reglages: 'Réglages',
-  };
+  const activeTeams = data?.teams.filter((team) => !team.archivedAt).length ?? 0;
+  const activeBots = data?.bots.filter((bot) => !bot.archivedAt).length ?? 0;
 
   return (
-    <div class={`shell${route === 'bureau' ? ' office-full' : ''}`}>
-      <aside class="rail">
+    <div class="app">
+      <header class="top-hud">
         <div class="brand">
-          <svg width="34" height="34" viewBox="0 0 32 32" aria-hidden="true">
-            <rect width="32" height="32" rx="8" fill="#241d16" />
-            <path d="M6 14.5 16 8.5 26 14.5 16 20.5Z" fill="#f3e6d4" />
-            <path d="M6 14.5 16 20.5 16 25.5 6 19.5Z" fill="#c4622d" />
-            <path d="M26 14.5 16 20.5 16 25.5 26 19.5Z" fill="#1f6f64" />
+          <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="10" fill="#1c2430" />
+            <circle cx="12" cy="14" r="4" fill="#8eb7ff" />
+            <circle cx="21" cy="13" r="3" fill="#ffb067" />
+            <circle cx="18" cy="20" r="3.5" fill="#c4b2ff" />
           </svg>
           <div>
             <strong>Bot Cockpit</strong>
-            <small>Atelier local</small>
+            <small>{data?.settings.demoMode ? 'Démonstration' : 'Mode réel'}</small>
           </div>
         </div>
-        <nav class="nav">
+        <nav class="nav-pills" aria-label="Sections">
           {NAV.map(([id, label]) => (
             <button
               key={id}
@@ -100,43 +94,39 @@ export function Shell({ email, onLogout }: { email: string; onLogout: () => void
             </button>
           ))}
         </nav>
-        <div class="rail-foot">
+        <div class="count-pills">
+          <span>{activeTeams} équipes</span>
+          <span>{activeBots} bots</span>
+          <span>{data?.signals.length ?? 0} événements</span>
+        </div>
+        <div class="user-pill">
           <span>{email}</span>
           <button
             class="btn small"
             type="button"
             onClick={() => void api('/api/logout', { method: 'POST' }).finally(onLogout)}
           >
-            Fermer la session
+            Sortir
           </button>
         </div>
-      </aside>
-      <main class="main">
-        {data?.settings.demoMode && (
-          <div class="banner" role="status">
-            <strong>Données de démonstration</strong>
-            <div>Ces fiches et ces lignes sont fictives. Elles ne décrivent pas un compte.</div>
-          </div>
-        )}
-        {route !== 'bureau' && (
-          <header class="topbar">
-            <div>
-              <p class="kicker">{data?.settings.demoMode ? 'Démonstration' : 'Mode réel'}</p>
-              <h1>{titles[route]}</h1>
-            </div>
-            <button
-              class="btn small only-mobile"
-              type="button"
-              onClick={() => void api('/api/logout', { method: 'POST' }).finally(onLogout)}
-            >
-              Sortir
-            </button>
-          </header>
-        )}
+      </header>
+      {data?.settings.demoMode && (
+        <div class="demo-pill" role="status">
+          <strong>Données de démonstration</strong>
+          <span>Fiches et lignes fictives. Elles ne décrivent pas un compte.</span>
+        </div>
+      )}
+      <main class={route === 'bureau' ? 'stage' : 'page'}>
         {error && <div class="error">{error}</div>}
         {!data && !error && <p class="meta">Ouverture de l’atelier…</p>}
         {data && route === 'bureau' && (
-          <Office key={openId ?? 'bureau'} data={data} reload={reload} initialId={openId} />
+          <Office
+            key={openId ?? 'bureau'}
+            data={data}
+            reload={reload}
+            email={email}
+            initialId={openId}
+          />
         )}
         {data && route === 'liste' && (
           <ListView
