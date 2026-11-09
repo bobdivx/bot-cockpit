@@ -341,6 +341,106 @@ label.btn {
   grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
   gap: 16px;
 }
+.shell.office-full {
+  height: 100vh;
+  overflow: hidden;
+}
+.shell.office-full .main {
+  padding: 0;
+  gap: 0;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.shell.office-full .banner {
+  margin: 0;
+  border-radius: 0;
+}
+.office-screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.office-screen .scene-stage,
+.office-screen .org {
+  height: 100%;
+  min-height: 0;
+  border-radius: 0;
+}
+.office-tools {
+  position: absolute;
+  z-index: 4;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.96);
+  border-radius: 999px;
+  box-shadow: 0 10px 24px rgba(30, 40, 60, 0.12);
+}
+.office-tools .btn {
+  background: transparent;
+  color: #1c2430;
+  box-shadow: none;
+}
+.office-tools .btn.primary {
+  background: #1c2430;
+  color: #fff;
+}
+.float-card {
+  position: absolute;
+  z-index: 4;
+  top: 58px;
+  right: 12px;
+  width: min(280px, calc(100% - 24px));
+  max-height: calc(100% - 150px);
+  overflow: auto;
+  padding: 12px 12px 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #1c2430;
+  box-shadow: 0 16px 36px rgba(30, 40, 60, 0.14);
+}
+.float-card h2 {
+  font-size: 1.35rem;
+  margin: 0;
+}
+.float-card .stack {
+  margin-top: 0;
+  gap: 8px;
+}
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(28, 36, 48, 0.38);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.modal {
+  width: min(520px, 100%);
+  max-height: min(86vh, 760px);
+  overflow: auto;
+  background: var(--raised-solid);
+  color: var(--ink);
+  border-radius: 20px;
+  padding: 16px 16px 20px;
+  box-shadow: 0 24px 60px rgba(20, 28, 40, 0.28);
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+.modal-head h2 {
+  margin: 4px 0 0;
+}
 .scene-card {
   padding: 12px;
   overflow: hidden;
@@ -413,7 +513,7 @@ label.btn {
   box-shadow: 0 10px 24px rgba(30, 40, 60, 0.1);
   padding: 8px 12px;
   text-align: left;
-  min-width: 148px;
+  min-width: 128px;
   display: grid;
 }
 .floor-nav button small {
@@ -814,6 +914,45 @@ pre.snippet {
   .scene-stage {
     height: 68vh;
     min-height: 420px;
+  }
+  .shell.office-full {
+    height: auto;
+    overflow: visible;
+    min-height: 100vh;
+  }
+  .shell.office-full .main {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  .office-screen {
+    min-height: 72vh;
+  }
+  .office-screen .scene-stage {
+    min-height: 72vh;
+    height: 72vh;
+  }
+  .office-tools {
+    left: 12px;
+    right: 12px;
+    transform: none;
+    justify-content: center;
+    width: auto;
+  }
+  .float-card {
+    top: auto;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: 40vh;
+  }
+  .floor-nav {
+    top: 58px;
+    max-width: 46vw;
+  }
+  .floor-nav button {
+    min-width: 0;
   }
   .scene-hud {
     flex-direction: column;

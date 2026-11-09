@@ -71,7 +71,7 @@ export function Shell({ email, onLogout }: { email: string; onLogout: () => void
   };
 
   return (
-    <div class="shell">
+    <div class={`shell${route === 'bureau' ? ' office-full' : ''}`}>
       <aside class="rail">
         <div class="brand">
           <svg width="34" height="34" viewBox="0 0 32 32" aria-hidden="true">
@@ -118,19 +118,21 @@ export function Shell({ email, onLogout }: { email: string; onLogout: () => void
             <div>Ces fiches et ces lignes sont fictives. Elles ne décrivent pas un compte.</div>
           </div>
         )}
-        <header class="topbar">
-          <div>
-            <p class="kicker">{data?.settings.demoMode ? 'Démonstration' : 'Mode réel'}</p>
-            <h1>{titles[route]}</h1>
-          </div>
-          <button
-            class="btn small only-mobile"
-            type="button"
-            onClick={() => void api('/api/logout', { method: 'POST' }).finally(onLogout)}
-          >
-            Sortir
-          </button>
-        </header>
+        {route !== 'bureau' && (
+          <header class="topbar">
+            <div>
+              <p class="kicker">{data?.settings.demoMode ? 'Démonstration' : 'Mode réel'}</p>
+              <h1>{titles[route]}</h1>
+            </div>
+            <button
+              class="btn small only-mobile"
+              type="button"
+              onClick={() => void api('/api/logout', { method: 'POST' }).finally(onLogout)}
+            >
+              Sortir
+            </button>
+          </header>
+        )}
         {error && <div class="error">{error}</div>}
         {!data && !error && <p class="meta">Ouverture de l’atelier…</p>}
         {data && route === 'bureau' && (

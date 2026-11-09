@@ -130,7 +130,7 @@ function wallLabel(text: string): THREE.Mesh {
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(3.4, 0.85),
+    new THREE.PlaneGeometry(2.15, 0.46),
     new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }),
   );
   return mesh;
@@ -157,6 +157,7 @@ export class CampusView {
   private primed = false;
   private reduced = false;
   private aiming = false;
+  private overview = true;
   private disposed = false;
   private raf = 0;
   private lastFrame = performance.now();
@@ -205,7 +206,7 @@ export class CampusView {
     this.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
     this.controls.touches.ONE = THREE.TOUCH.PAN;
     this.controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
-    this.controls.minZoom = 0.45;
+    this.controls.minZoom = 0.28;
     this.controls.maxZoom = 3.6;
     this.controls.target.set(0, 0.4, 0);
     this.goalPos.copy(this.camera.position);
@@ -256,31 +257,76 @@ export class CampusView {
   }
 
   resetCamera(): void {
-    const centers = [...this.roomCenters.values()];
+    this.overview = true;
+    const points = this.framePoints();
     const focus = new THREE.Vector3();
-    if (centers.length > 0) {
-      for (const center of centers) focus.add(center);
-      focus.multiplyScalar(1 / centers.length);
+    for (const point of points) focus.add(point);
+    focus.multiplyScalar(1 / points.length);
+    const savedZoom = this.camera.zoom;
+    const savedPos = this.camera.position.clone();
+    const savedTarget = this.controls.target.clone();
+    this.camera.zoom = 1;
+    this.camera.position.copy(focus).add(this.iso);
+    this.camera.lookAt(focus);
+    this.camera.updateProjectionMatrix();
+    this.camera.updateMatrixWorld();
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    const probe = new THREE.Vector3();
+    for (const point of points) {
+      probe.copy(point).project(this.camera);
+      minX = Math.min(minX, probe.x);
+      maxX = Math.max(maxX, probe.x);
+      minY = Math.min(minY, probe.y);
+      maxY = Math.max(maxY, probe.y);
     }
-    let span = 4;
-    for (const center of centers) span = Math.max(span, focus.distanceTo(center));
-    const zoom = centers.length <= 1 ? 1.72 : THREE.MathUtils.clamp(1.28 - span / 16, 0.58, 1.08);
-    this.focusAt(focus, zoom);
+    const allowX0 = -0.56;
+    const allowX1 = 0.94;
+    const allowY0 = -0.62;
+    const allowY1 = 0.84;
+    const zoom = THREE.MathUtils.clamp(
+      Math.min(
+        (allowX1 - allowX0) / Math.max(0.001, maxX - minX),
+        (allowY1 - allowY0) / Math.max(0.001, maxY - minY),
+      ),
+      0.28,
+      2.2,
+    );
+    const centerX = ((minX + maxX) / 2) * zoom;
+    const centerY = ((minY + maxY) / 2) * zoom;
+    const halfW = Math.abs(this.camera.right);
+    const halfH = Math.abs(this.camera.top);
+    const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+    const target = focus
+      .clone()
+      .addScaledVector(right, -(((allowX0 + allowX1) / 2 - centerX) * halfW) / zoom)
+      .addScaledVector(up, -(((allowY0 + allowY1) / 2 - centerY) * halfH) / zoom);
+    this.camera.zoom = savedZoom;
+    this.camera.position.copy(savedPos);
+    this.controls.target.copy(savedTarget);
+    this.camera.lookAt(savedTarget);
+    this.camera.updateProjectionMatrix();
+    this.focusAt(target, zoom);
   }
 
   enterSelected(): void {
+    this.overview = false;
     const actor = this.actors.find((item) => item.id === this.selectedId) ?? this.actors[0];
     if (!actor) {
       this.resetCamera();
       return;
     }
-    this.focusAt(actor.home, 2.85);
+    this.focusAt(actor.home.clone().setY(0.9), 2.85);
   }
 
   focusRoom(id: string): void {
     const center = this.roomCenters.get(id);
     if (!center) return;
-    this.focusAt(center, 2.05);
+    this.overview = false;
+    this.focusAt(center.clone().setY(0.8), 2.05);
     const occupant = this.actors.find((actor) => actor.root.parent?.userData.roomId === id);
     if (occupant) this.onSelect(occupant.id);
   }
@@ -299,7 +345,7 @@ export class CampusView {
   }
 
   private focusAt(point: THREE.Vector3, zoom: number): void {
-    this.goalTarget.set(point.x, 0.8, point.z);
+    this.goalTarget.copy(point);
     this.goalPos.copy(this.goalTarget).add(this.iso);
     this.goalZoom = zoom;
     this.aiming = true;
@@ -357,7 +403,6 @@ export class CampusView {
       const spot = new THREE.Vector3(-2 + index * 1.4, 0, 4.2);
       this.root.add(this.buildActor(bot, 0, 1, true, spot));
     });
-    if (plates.length >= 2) this.root.add(this.pingPongAt(0, 0));
     if (snapshot.demo && snapshot.bots.length >= 2) this.root.add(this.buildCourier());
     this.root.updateWorldMatrix(true, true);
     for (const actor of this.actors) actor.root.getWorldPosition(actor.home);
@@ -380,7 +425,7 @@ export class CampusView {
     const col = index % cols;
     const row = Math.floor(index / cols);
     const rows = Math.ceil(count / cols);
-    return new THREE.Vector3((col - (cols - 1) / 2) * 12, 0, (row - (rows - 1) / 2) * 10);
+    return new THREE.Vector3((col - (cols - 1) / 2) * 8.6, 0, (row - (rows - 1) / 2) * 7);
   }
 
   private buildEmptyPlate(spot: THREE.Vector3): THREE.Group {
@@ -396,13 +441,13 @@ export class CampusView {
   private slab(tint: string): THREE.Group {
     const group = new THREE.Group();
     const top = new THREE.Mesh(
-      new THREE.BoxGeometry(9.2, 0.26, 7.2),
+      new THREE.BoxGeometry(7.6, 0.26, 5.8),
       new THREE.MeshStandardMaterial({ color: tint, roughness: 0.92 }),
     );
     top.position.y = 0.13;
     top.receiveShadow = true;
     const skirt = new THREE.Mesh(
-      new THREE.BoxGeometry(9.45, 0.62, 7.45),
+      new THREE.BoxGeometry(7.85, 0.62, 6.05),
       new THREE.MeshStandardMaterial({ color: 0x1d2430, roughness: 0.8 }),
     );
     skirt.position.y = -0.24;
@@ -417,22 +462,22 @@ export class CampusView {
     group.userData.roomId = room.id;
     group.add(this.slab(tint));
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xf7f8fa, roughness: 0.9 });
-    const back = new THREE.Mesh(new THREE.BoxGeometry(9.2, 3.1, 0.12), wallMat);
-    back.position.set(0, 1.7, -3.5);
+    const back = new THREE.Mesh(new THREE.BoxGeometry(7.6, 2.4, 0.12), wallMat);
+    back.position.set(0, 1.46, -2.85);
     back.castShadow = true;
     back.receiveShadow = true;
-    const side = new THREE.Mesh(new THREE.BoxGeometry(0.12, 3.1, 7.2), wallMat);
-    side.position.set(-4.5, 1.7, 0);
+    const side = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.4, 5.8), wallMat);
+    side.position.set(-3.75, 1.46, 0);
     side.castShadow = true;
     side.receiveShadow = true;
     const title = wallLabel(room.name);
-    title.position.set(0.4, 2.35, -3.4);
+    title.position.set(0.15, 1.95, -2.76);
     group.add(
       back,
       side,
       title,
-      this.plant(-3.4, -2.4),
-      this.clock(2.6),
+      this.plant(-2.55, -1.7),
+      this.clock(2.05),
       this.rug(),
       this.bookPile(),
     );
@@ -445,11 +490,11 @@ export class CampusView {
 
   private addKindFurniture(group: THREE.Group, kind: RoomKind): void {
     if (kind === 'revue' || kind === 'labo') group.add(this.shelf());
-    if (kind === 'salon') group.add(this.pingPongAt(2.2, 1.4));
+    if (kind === 'salon') group.add(this.pingPongAt(1.55, 0.95));
     if (kind === 'atelier') group.add(this.rack());
     if (kind === 'diffusion') {
       const board = this.wallScreen();
-      board.position.set(-1.8, 1.7, -3.4);
+      board.position.set(-1.35, 1.5, -2.76);
       group.add(board);
     }
   }
@@ -458,7 +503,7 @@ export class CampusView {
     const group = new THREE.Group();
     const frame = new THREE.MeshStandardMaterial({ color: 0xfbfcfd, roughness: 0.7 });
     const caseBox = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.7, 0.32), frame);
-    caseBox.position.set(1.6, 1.2, -2.5);
+    caseBox.position.set(1.15, 1.15, -2.15);
     group.add(caseBox);
     for (let row = 0; row < 3; row += 1) {
       for (let col = 0; col < 7; col += 1) {
@@ -469,7 +514,7 @@ export class CampusView {
             roughness: 0.5,
           }),
         );
-        book.position.set(0.7 + col * 0.26, 0.6 + row * 0.48, -2.5);
+        book.position.set(0.28 + col * 0.25, 0.55 + row * 0.46, -2.15);
         group.add(book);
       }
     }
@@ -509,7 +554,7 @@ export class CampusView {
       new THREE.BoxGeometry(0.7, 1.5, 0.4),
       new THREE.MeshStandardMaterial({ color: 0x2a3340, roughness: 0.5 }),
     );
-    body.position.set(3.5, 1.05, -2.6);
+    body.position.set(2.55, 1.05, -1.75);
     group.add(body);
     for (let index = 0; index < 4; index += 1) {
       const led = new THREE.Mesh(
@@ -520,7 +565,7 @@ export class CampusView {
           emissiveIntensity: 0.8,
         }),
       );
-      led.position.set(3.5, 0.55 + index * 0.28, -2.38);
+      led.position.set(2.55, 0.55 + index * 0.28, -1.53);
       group.add(led);
     }
     return group;
@@ -555,7 +600,7 @@ export class CampusView {
         new THREE.BoxGeometry(0.46, 0.07, 0.32),
         new THREE.MeshStandardMaterial({ color: colors[index], roughness: 0.55 }),
       );
-      book.position.set(3.15, 0.34 + index * 0.08, 1.55);
+      book.position.set(2.35, 0.34 + index * 0.08, 1.15);
       book.rotation.y = (index - 1) * 0.18;
       book.castShadow = true;
       group.add(book);
@@ -585,7 +630,7 @@ export class CampusView {
       new THREE.CircleGeometry(0.22, 20),
       new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }),
     );
-    mesh.position.set(x, 2.15, -3.4);
+    mesh.position.set(x, 1.85, -2.76);
     return mesh;
   }
 
@@ -646,7 +691,7 @@ export class CampusView {
     const away = motion === 'away';
     const root = new THREE.Group();
     const span = Math.max(total, 1);
-    const x = loose ? 0 : (index - (span - 1) / 2) * 2.15;
+    const x = loose ? 0 : (index - (span - 1) / 2) * 1.7;
     const seatZ = away ? 2.15 : 1.05;
     const deskZ = 0.15;
     if (loose && looseSpot) root.position.copy(looseSpot);
@@ -918,6 +963,23 @@ export class CampusView {
     this.aiming = false;
   }
 
+  private framePoints(): THREE.Vector3[] {
+    const points: THREE.Vector3[] = [];
+    if (this.roomCenters.size === 0) {
+      points.push(new THREE.Vector3(-2, 0.2, -1.5), new THREE.Vector3(2, 2.4, 1.5));
+      return points;
+    }
+    for (const center of this.roomCenters.values()) {
+      for (const x of [-3.9, 3.9]) {
+        for (const z of [-3, 3]) {
+          points.push(center.clone().add(new THREE.Vector3(x, 0.2, z)));
+          points.push(center.clone().add(new THREE.Vector3(x, 2.6, z)));
+        }
+      }
+    }
+    return points;
+  }
+
   private frame = (): void => {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.frame);
@@ -946,6 +1008,7 @@ export class CampusView {
     this.camera.bottom = -view;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    if (this.overview && this.roomCenters.size > 0) this.resetCamera();
   };
 
   private onPointerDown = (event: PointerEvent): void => {

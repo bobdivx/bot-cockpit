@@ -24,6 +24,7 @@ export function Office({
   const [packs, setPacks] = useState<PackSummary[]>([]);
   const [error, setError] = useState('');
   const [view, setView] = useState<'bureau' | 'arbre'>('bureau');
+  const [adder, setAdder] = useState(false);
   const [team, setTeam] = useState<{ name: string; mission: string; accent: string }>({
     name: '',
     mission: '',
@@ -53,6 +54,15 @@ export function Office({
       .catch(() => setPacks([]));
   }, []);
 
+  useEffect(() => {
+    if (!adder) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAdder(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [adder]);
+
   async function run(action: () => Promise<unknown>) {
     setError('');
     try {
@@ -64,69 +74,80 @@ export function Office({
   }
 
   return (
-    <div class="workspace">
-      <section class="scene-card">
-        <div class="chips" style="margin-bottom:8px">
-          <button
-            class={view === 'bureau' ? 'btn small primary' : 'btn small'}
-            type="button"
-            onClick={() => setView('bureau')}
-          >
-            Bureau
-          </button>
-          <button
-            class={view === 'arbre' ? 'btn small primary' : 'btn small'}
-            type="button"
-            onClick={() => setView('arbre')}
-          >
-            Arborescence
-          </button>
-        </div>
-        {view === 'bureau' ? (
-          <OfficeScene
-            rooms={rooms}
-            teams={data.teams}
-            bots={bots}
-            signals={data.signals}
-            demo={data.settings.demoMode}
-            selected={selectedId}
-            onSelect={setSelectedId}
-          />
-        ) : (
-          <OrgTree teams={activeTeams} bots={bots} onSelect={setSelectedId} />
-        )}
-        <div class="chips" style="margin-top:8px">
-          {STATUSES.map((status) => (
-            <Badge
-              key={status}
-              tone={status === 'blocked' ? 'danger' : status === 'working' ? 'pine' : 'neutral'}
-            >
-              {STATUS_LABEL[status]}
-            </Badge>
-          ))}
-          <Badge tone="warn">Figé : signal ancien</Badge>
-        </div>
-      </section>
-      <aside class="panel">
-        {error && <div class="error">{error}</div>}
-        {selected ? (
+    <div class="office-screen">
+      {view === 'bureau' ? (
+        <OfficeScene
+          rooms={rooms}
+          teams={data.teams}
+          bots={bots}
+          signals={data.signals}
+          demo={data.settings.demoMode}
+          selected={selectedId}
+          onSelect={setSelectedId}
+        />
+      ) : (
+        <OrgTree teams={activeTeams} bots={bots} onSelect={setSelectedId} />
+      )}
+      <div class="office-tools">
+        <button
+          class={view === 'bureau' ? 'btn small primary' : 'btn small'}
+          type="button"
+          onClick={() => setView('bureau')}
+        >
+          Bureau
+        </button>
+        <button
+          class={view === 'arbre' ? 'btn small primary' : 'btn small'}
+          type="button"
+          onClick={() => setView('arbre')}
+        >
+          Arborescence
+        </button>
+        <button class="btn small" type="button" onClick={() => setAdder(true)}>
+          Ajouter
+        </button>
+      </div>
+      {selected && (
+        <aside class="float-card" aria-label="Fiche sélectionnée">
+          {error && <div class="error">{error}</div>}
           <BotCard
             bot={selected}
             data={data}
             onClose={() => setSelectedId(null)}
             onChange={(action) => run(action)}
           />
-        ) : (
-          <>
-            <div>
-              <p class="kicker">Fiches</p>
-              <h2>{bots.length === 0 ? 'L’atelier est vide' : 'Qui est dans la salle'}</h2>
-              <p class="meta">
-                Le mode réel ne crée aucune fiche tout seul. Une consigne d’équipe est un texte :
-                l’appliquer ajoute des fiches manuelles, sans installer de bot et sans exécuter de
-                code.
-              </p>
+        </aside>
+      )}
+      {adder && (
+        <div
+          class="modal-back"
+          onClick={() => setAdder(false)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setAdder(false);
+          }}
+        >
+          <div
+            class="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ajouter-title"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <div class="modal-head">
+              <div>
+                <p class="kicker">Fiches</p>
+                <h2 id="ajouter-title">Ajouter</h2>
+              </div>
+              <button class="btn small" type="button" onClick={() => setAdder(false)}>
+                Fermer
+              </button>
             </div>
+            {error && <div class="error">{error}</div>}
+            <p class="meta">
+              Le mode réel ne crée aucune fiche tout seul. Une consigne ajoute des fiches manuelles,
+              sans installer de bot et sans exécuter de code.
+            </p>
             {bots.length === 0 && (
               <Empty title="Aucune fiche">
                 Ajoutez une équipe, une salle ou une fiche. Rien ici n’est un bot déjà en service.
@@ -348,9 +369,9 @@ export function Office({
                 ))}
               </div>
             )}
-          </>
-        )}
-      </aside>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
