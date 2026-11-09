@@ -1,8 +1,10 @@
 # Bot Cockpit
 
-Atelier local pour Mathieu JESER : fiches d’équipes et de bots, bureau isométrique, imports CSV d’usage, et signalements volontaires via MCP. Interface en français. Nom de travail indépendant : **Bot Cockpit**. Ce n’est pas une console de compte et ce n’est pas un produit Grok Bot.
+Projet indépendant. **Bot Cockpit** n’est pas un produit officiel Grok Bot, ni un produit xAI, ni une console de compte. Rien ici ne se connecte à un compte, ne lit de cookie de session, et n’installe quoi que ce soit à votre place.
 
-Le mode réel démarre vide. Aucun usage, aucun coût et aucune économie ne sont inventés. La démonstration est un choix explicite, marqué **Données de démonstration**.
+Interface en français : fiches d’équipes et de bots, bureau isométrique, imports CSV d’usage, et signalements volontaires via MCP.
+
+Le mode réel démarre vide. Aucun usage, aucun coût et aucune économie ne sont inventés. La démonstration est un choix explicite. Tant qu’elle est active, l’interface affiche **Données de démonstration** : ces fiches et ces lignes sont fictives, elles ne décrivent pas un compte, et les retirer n’efface que ces lignes-là.
 
 ## Lancer en local
 
@@ -30,7 +32,7 @@ NODE_ENV=production BOT_COCKPIT_ALLOW_OPEN_SETUP=1 npm start
 
 ## Docker Compose
 
-Le déploiement prévu est **DevForge**, avec Docker Compose. Il n’y a pas de configuration Vercel.
+L’hébergement prévu est Docker Compose. Il n’y a pas de configuration Vercel. Rien dans ce dépôt ne déploie ni ne publie tout seul.
 
 ```bash
 export BOT_COCKPIT_SETUP_TOKEN='remplacez-par-un-secret-long'
@@ -44,7 +46,7 @@ docker compose up --build
 - `BOT_COCKPIT_ALLOW_OPEN_SETUP=0` par défaut. Hors boucle locale, le premier propriétaire exige `BOT_COCKPIT_SETUP_TOKEN`.
 - Les exemples de secrets sont dans `.env.example`. Ne pas y mettre de vrais jetons.
 
-Le fichier `deploy/devforge.json` décrit ce contrat. Le connecteur DevForge n’était pas joignable pendant la construction : **rien n’a été déployé**.
+Le fichier `deploy/devforge.json` ne fait que décrire ce contrat Compose. Il ne déclenche aucun déploiement.
 
 ## Ce que l’atelier fait
 
@@ -74,4 +76,4 @@ Le fichier `deploy/devforge.json` décrit ce contrat. Le connecteur DevForge n�
 1. Déposer un CSV réel du compte et vérifier le mapping, les coûts `Included` et les lignes sans bot.
 2. Ajouter l’URL MCP affichée dans Liens à un bot, avec un jeton créé ici, puis contrôler qu’un `report_status` arrive. Ne pas confondre cet essai avec une connexion déjà active : elle ne l’est pas.
 3. Si une routine webhook doit être appelée, renseigner son URL dans `BOT_COCKPIT_WEBHOOKS` côté serveur, puis confirmer `DEMANDER`. Le résultat reste « demandé / en attente ».
-4. Déployer le Compose sur DevForge, avec le volume et le jeton de configuration, sans publier le dépôt ni acheter de domaine.
+4. Lancer le Compose avec le volume et un jeton de configuration choisi par vous. Les exemples de `.env.example` ne sont pas des secrets.
