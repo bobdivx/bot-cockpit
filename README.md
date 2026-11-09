@@ -32,7 +32,7 @@ NODE_ENV=production BOT_COCKPIT_ALLOW_OPEN_SETUP=1 npm start
 
 ## Docker Compose
 
-L’hébergement prévu est Docker Compose. Il n’y a pas de configuration Vercel. Rien dans ce dépôt ne déploie ni ne publie tout seul.
+L’hébergement prévu pour des données persistantes est Docker Compose / DevForge. Une configuration Vercel (`vercel.json`, `api/index.ts`) existe pour une démo en ligne : la base SQLite y est écrite dans `/tmp` et **n’est pas persistante** (réinitialisation aux redémarrages à froid). Rien dans ce dépôt ne déploie ni ne publie tout seul.
 
 ```bash
 export BOT_COCKPIT_SETUP_TOKEN='remplacez-par-un-secret-long'
@@ -47,6 +47,19 @@ docker compose up --build
 - Les exemples de secrets sont dans `.env.example`. Ne pas y mettre de vrais jetons.
 
 Le fichier `deploy/devforge.json` ne fait que décrire ce contrat Compose. Il ne déclenche aucun déploiement.
+
+
+## Vercel (démo, stockage temporaire)
+
+Prérequis : compte Hobby Vercel, Node 22.x.
+
+1. Importez le dépôt ou déployez depuis la CLI.
+2. Variables d’environnement recommandées :
+   - `BOT_COCKPIT_SETUP_TOKEN` (secret long, obligatoire pour créer le premier propriétaire)
+   - `BOT_COCKPIT_COOKIE_SECURE=1`
+   - `BOT_COCKPIT_ALLOW_OPEN_SETUP=0`
+3. L’interface affiche clairement que le stockage est temporaire.
+4. Pour une installation durable, préférez Docker Compose (volume `/data`) ou DevForge.
 
 ## Ce que l’atelier fait
 
@@ -68,7 +81,7 @@ Le fichier `deploy/devforge.json` ne fait que décrire ce contrat Compose. Il ne
 - Le dépôt communautaire `dimpurr/grok-bot-gateway` n’est pas une API officielle et n’est pas utilisé.
 - Les packs sont originaux. Les dépôts MIT `cobusgreyling/grok-bot-templates` et `serenakeyitan/agent-org-chart` n’ont pas été copiés.
 - Un seul propriétaire, une seule base. Ce n’est pas un service multi-clients.
-- `node:sqlite` est encore marqué expérimental dans Node.js 22. Le volume Docker est le moyen de garder les données après redémarrage.
+- `node:sqlite` est encore marqué expérimental dans Node.js 22. Le volume Docker est le moyen de garder les données après redémarrage. Sur Vercel, le fichier va dans `/tmp` et disparaît aux cold starts.
 - Les actions dont le nom est `stop`, `delete`, `kill` ou équivalent sont refusées au démarrage.
 
 ## Vérification encore nécessaire

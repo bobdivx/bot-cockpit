@@ -99,6 +99,7 @@ export type AppOptions = {
   clientDir?: string;
   fixturesDir?: string;
   cookieSecure?: boolean;
+  ephemeralStorage?: boolean;
 };
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -109,6 +110,7 @@ export function createApp(options: AppOptions) {
   const allowOpenSetup = options.allowOpenSetup === true;
   const setupToken = options.setupToken ?? '';
   const rateLimit = options.rateLimit !== false;
+  const ephemeralStorage = options.ephemeralStorage === true;
   const hits = new Map<string, number[]>();
   const listeners = new Set<(event: string, data: unknown) => void>();
   const dummyHash = hashPassword('timing-padding-not-a-password');
@@ -249,7 +251,14 @@ export function createApp(options: AppOptions) {
     if (c.req.path.startsWith('/api/')) c.header('Cache-Control', 'no-store');
   });
 
-  app.get('/api/health', (c) => c.json({ ok: true, service: 'bot-cockpit', version: APP_VERSION }));
+  app.get('/api/health', (c) =>
+    c.json({
+      ok: true,
+      service: 'bot-cockpit',
+      version: APP_VERSION,
+      ephemeralStorage,
+    }),
+  );
 
   app.get('/api/bootstrap', (c) => {
     purgeExpired(options.db, now());
@@ -258,6 +267,7 @@ export function createApp(options: AppOptions) {
       needsSetup: userCount(options.db) === 0,
       setupRequiresToken: Boolean(setupToken) || (!allowOpenSetup && !isLoopback(ip)),
       openSetup: allowOpenSetup && !setupToken,
+      ephemeralStorage,
     });
   });
 
@@ -997,7 +1007,16 @@ function assertPassword(value: unknown): string {
   return password;
 }
 
-function clientIp(c: { req: { raw: Request } }): string {
+function clientIp(c: {
+  req: { raw: Request; header: (name: string) => string | undefined };
+}): string {
+  const forwarded = c.req.header('x-forwarded-for');
+  if (forwarded) {
+    const first = forwarded.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  const realIp = c.req.header('x-real-ip');
+  if (realIp) return realIp;
   try {
     const info = getConnInfo(c as never);
     return info.remote.address ?? 'unknown';

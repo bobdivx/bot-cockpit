@@ -3,7 +3,12 @@ import { ApiError, api } from './api';
 import { Shell } from './shell';
 import { Field } from './ui';
 
-type Boot = { needsSetup: boolean; setupRequiresToken: boolean; openSetup: boolean };
+type Boot = {
+  needsSetup: boolean;
+  setupRequiresToken: boolean;
+  openSetup: boolean;
+  ephemeralStorage?: boolean;
+};
 
 export function App() {
   const [boot, setBoot] = useState<Boot | null>(null);
@@ -56,7 +61,14 @@ export function App() {
       </div>
     );
   }
-  if (email) return <Shell email={email} onLogout={() => setEmail(null)} />;
+  if (email)
+    return (
+      <Shell
+        email={email}
+        ephemeralStorage={Boolean(boot.ephemeralStorage)}
+        onLogout={() => setEmail(null)}
+      />
+    );
   if (boot.needsSetup) return <Setup boot={boot} onDone={(next) => setEmail(next)} />;
   return <Login onDone={(next) => setEmail(next)} />;
 }
@@ -89,6 +101,12 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
           L’atelier démarre vide. Aucune fiche, aucun usage et aucune économie ne sont inventés. Un
           seul compte local ouvre ensuite le bureau.
         </p>
+        {boot.ephemeralStorage && (
+          <p class="note" role="status">
+            Hébergement Vercel : la base SQLite est temporaire (/tmp) et se réinitialise aux
+            redémarrages à froid. Pour des données persistantes, utilisez Docker Compose / DevForge.
+          </p>
+        )}
         {boot.openSetup && (
           <p class="note">
             Configuration initiale ouverte parce que le serveur est en mode développement.

@@ -19,7 +19,15 @@ const NAV = [
 
 type Route = (typeof NAV)[number][0];
 
-export function Shell({ email, onLogout }: { email: string; onLogout: () => void }) {
+export function Shell({
+  email,
+  ephemeralStorage = false,
+  onLogout,
+}: {
+  email: string;
+  ephemeralStorage?: boolean;
+  onLogout: () => void;
+}) {
   const [data, setData] = useState<Workspace | null>(null);
   const [tokens, setTokens] = useState<AccessToken[]>([]);
   const [error, setError] = useState('');
@@ -110,6 +118,15 @@ export function Shell({ email, onLogout }: { email: string; onLogout: () => void
           </button>
         </div>
       </header>
+      {ephemeralStorage && (
+        <div class="demo-pill ephemeral-pill" role="status">
+          <strong>Stockage temporaire (Vercel)</strong>
+          <span>
+            SQLite dans /tmp : les données peuvent disparaître à chaque redémarrage à froid. Docker
+            / DevForge reste l’installation persistante.
+          </span>
+        </div>
+      )}
       {data?.settings.demoMode && (
         <div class="demo-pill" role="status">
           <strong>Données de démonstration</strong>

@@ -1203,3 +1203,8 @@ pre.snippet,
     gap: 6px;
   }
 }
+
+.demo-pill.ephemeral-pill {
+  background: color-mix(in srgb, #ffb067 18%, white);
+  border-color: color-mix(in srgb, #ffb067 40%, transparent);
+}
