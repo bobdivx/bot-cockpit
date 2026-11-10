@@ -45,8 +45,10 @@ import {
   createOwner,
   createRoom,
   createTeam,
+  createUser,
   deleteImport,
   deleteSession,
+  deleteUser,
   exportRows,
   findOwnerByEmail,
   getBot,
@@ -100,6 +102,7 @@ export type AppOptions = {
   fixturesDir?: string;
   cookieSecure?: boolean;
   ephemeralStorage?: boolean;
+  allowSignup?: boolean;
 };
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -111,14 +114,17 @@ export function createApp(options: AppOptions) {
   const setupToken = options.setupToken ?? '';
   const rateLimit = options.rateLimit !== false;
   const ephemeralStorage = options.ephemeralStorage === true;
+  const allowSignup = options.allowSignup !== false;
   const hits = new Map<string, number[]>();
-  const listeners = new Set<(event: string, data: unknown) => void>();
+  const listeners = new Set<{ userId: string; fn: (event: string, data: unknown) => void }>();
+  const mcpOwners = new Map<string, string>();
   const dummyHash = hashPassword('timing-padding-not-a-password');
 
-  const publish = (event: string, data: unknown = { ok: true }) => {
+  const publish = (userId: string, event: string, data: unknown = { ok: true }) => {
     for (const listener of [...listeners]) {
+      if (listener.userId !== userId) continue;
       try {
-        listener(event, data);
+        listener.fn(event, data);
       } catch {
         listeners.delete(listener);
       }
@@ -157,8 +163,11 @@ export function createApp(options: AppOptions) {
           }),
         },
         async (args) => {
-          const result = recordSignal(
+          const ownerId = mcpOwners.get(tokenId);
+          if (!ownerId) throw new Error('Jeton sans espace utilisateur.');
+          const result = await recordSignal(
             options.db,
+            ownerId,
             {
               kind: 'status',
               botKey: args.bot_id,
@@ -171,9 +180,16 @@ export function createApp(options: AppOptions) {
             },
             now(),
           );
-          addAudit(options.db, `mcp:${tokenId}`, 'mcp.status', result.message, now());
-          publish('bot.updated');
-          publish('event.created');
+          await addAudit(
+            options.db,
+            ownerId,
+            `mcp:${tokenId}`,
+            'mcp.status',
+            result.message,
+            now(),
+          );
+          publish(ownerId, 'bot.updated');
+          publish(ownerId, 'event.created');
           return { content: [{ type: 'text', text: result.message }] };
         },
       );
@@ -201,8 +217,11 @@ export function createApp(options: AppOptions) {
         },
         async (args) => {
           const tokens = cleanTokens(args.tokens);
-          const result = recordSignal(
+          const ownerId = mcpOwners.get(tokenId);
+          if (!ownerId) throw new Error('Jeton sans espace utilisateur.');
+          const result = await recordSignal(
             options.db,
+            ownerId,
             {
               kind: 'event',
               botKey: args.bot_id,
@@ -214,9 +233,9 @@ export function createApp(options: AppOptions) {
             },
             now(),
           );
-          addAudit(options.db, `mcp:${tokenId}`, 'mcp.event', result.message, now());
-          publish('event.created');
-          if (result.linked) publish('bot.updated');
+          await addAudit(options.db, ownerId, `mcp:${tokenId}`, 'mcp.event', result.message, now());
+          publish(ownerId, 'event.created');
+          if (result.linked) publish(ownerId, 'bot.updated');
           return { content: [{ type: 'text', text: result.message }] };
         },
       );
@@ -251,7 +270,7 @@ export function createApp(options: AppOptions) {
     if (c.req.path.startsWith('/api/')) c.header('Cache-Control', 'no-store');
   });
 
-  app.get('/api/health', (c) =>
+  app.get('/api/health', async (c) =>
     c.json({
       ok: true,
       service: 'bot-cockpit',
@@ -260,12 +279,15 @@ export function createApp(options: AppOptions) {
     }),
   );
 
-  app.get('/api/bootstrap', (c) => {
-    purgeExpired(options.db, now());
+  app.get('/api/bootstrap', async (c) => {
+    await purgeExpired(options.db, now());
     const ip = clientIp(c);
+    const empty = (await userCount(options.db)) === 0;
     return c.json({
-      needsSetup: userCount(options.db) === 0,
-      setupRequiresToken: Boolean(setupToken) || (!allowOpenSetup && !isLoopback(ip)),
+      needsSetup: empty && !allowSignup,
+      allowSignup,
+      setupRequiresToken:
+        empty && !allowSignup && (Boolean(setupToken) || (!allowOpenSetup && !isLoopback(ip))),
       openSetup: allowOpenSetup && !setupToken,
       ephemeralStorage,
     });
@@ -278,9 +300,14 @@ export function createApp(options: AppOptions) {
       return c.json({ error: 'En-tête de confirmation manquant.' }, 403);
     }
     const raw = getCookie(c, 'cockpit_session');
-    const user = raw ? userFromToken(options.db, raw, now()) : null;
+    const user = raw ? await userFromToken(options.db, raw, now()) : null;
     c.set('user', user);
-    if (c.req.path !== '/api/setup' && c.req.path !== '/api/login' && !user) {
+    if (
+      c.req.path !== '/api/setup' &&
+      c.req.path !== '/api/login' &&
+      c.req.path !== '/api/signup' &&
+      !user
+    ) {
       return c.json({ error: 'Authentification requise.' }, 401);
     }
     return next();
@@ -303,10 +330,24 @@ export function createApp(options: AppOptions) {
     }
     const email = assertEmail(body.email);
     const password = assertPassword(body.password);
-    const owner = createOwner(options.db, email, hashPassword(password), now());
+    const owner = await createOwner(options.db, email, hashPassword(password), now());
     setSession(c, owner.token);
-    publish('bot.updated');
+    publish(owner.id, 'bot.updated');
     return c.json({ email: owner.email });
+  });
+
+  app.post('/api/signup', async (c) => {
+    const ip = clientIp(c);
+    if (!allowSignup) return c.json({ error: 'Les inscriptions sont fermées.' }, 403);
+    if (!allow(`signup:${ip}`, 8, 15 * 60_000))
+      return c.json({ error: 'Trop de tentatives.' }, 429);
+    const body = await readJson(c);
+    const email = assertEmail(body.email);
+    const password = assertPassword(body.password);
+    const user = await createUser(options.db, email, hashPassword(password), now());
+    setSession(c, user.token);
+    publish(user.id, 'bot.updated');
+    return c.json({ email: user.email }, 201);
   });
 
   app.post('/api/login', async (c) => {
@@ -316,31 +357,48 @@ export function createApp(options: AppOptions) {
     const body = await readJson(c);
     const email = assertEmail(body.email);
     const password = typeof body.password === 'string' ? body.password : '';
-    const owner = findOwnerByEmail(options.db, email);
+    const owner = await findOwnerByEmail(options.db, email);
     const ok = verifyPassword(password, owner?.passwordHash ?? dummyHash);
     if (!owner || !ok) return c.json({ error: 'Identifiants refusés.' }, 401);
-    const session = openSession(options.db, owner.id, owner.email, now());
-    addAudit(options.db, owner.email, 'login', 'Session ouverte.', now());
+    const session = await openSession(options.db, owner.id, owner.email, now());
+    await addAudit(options.db, owner.id, owner.email, 'login', 'Session ouverte.', now());
     setSession(c, session.token);
     return c.json({ email: owner.email });
   });
 
-  app.post('/api/logout', (c) => {
+  app.post('/api/logout', async (c) => {
     const user = requireUser(c);
-    deleteSession(options.db, user.sessionId);
+    await deleteSession(options.db, user.sessionId);
     deleteCookie(c, 'cockpit_session', { path: '/' });
     return c.json({ ok: true });
   });
 
-  app.get('/api/me', (c) => {
+  app.get('/api/me', async (c) => {
     const user = requireUser(c);
-    return c.json({ email: user.email });
+    return c.json({ email: user.email, id: user.id });
   });
 
-  app.get('/api/workspace', (c) => {
-    requireUser(c);
-    purgeExpired(options.db, now());
-    const data = workspace(options.db, now());
+  app.post('/api/account/delete', async (c) => {
+    const user = requireUser(c);
+    const body = await readJson(c);
+    const password = typeof body.password === 'string' ? body.password : '';
+    const account = await findOwnerByEmail(options.db, user.email);
+    if (!account || !verifyPassword(password, account.passwordHash)) {
+      return c.json({ error: 'Mot de passe refusé.' }, 401);
+    }
+    if (body.confirm !== 'SUPPRIMER') {
+      return c.json({ error: 'Saisissez SUPPRIMER pour confirmer.' }, 400);
+    }
+    await deleteUser(options.db, user.id);
+    deleteCookie(c, 'cockpit_session', { path: '/' });
+    return c.json({ ok: true });
+  });
+
+  app.get('/api/workspace', async (c) => {
+    const user = requireUser(c);
+    await purgeExpired(options.db, now());
+    await applyRetention(options.db, user.id, now());
+    const data = await workspace(options.db, user.id, now());
     data.webhookActions = webhooks.map((item) => item.name);
     return c.json(data);
   });
@@ -348,8 +406,9 @@ export function createApp(options: AppOptions) {
   app.post('/api/teams', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const team = createTeam(
+    const team = await createTeam(
       options.db,
+      user.id,
       {
         name: String(body.name ?? ''),
         mission: String(body.mission ?? ''),
@@ -358,53 +417,68 @@ export function createApp(options: AppOptions) {
       user.email,
       now(),
     );
-    publish('bot.updated');
+    publish(user.id, 'bot.updated');
     return c.json(team, 201);
   });
 
   app.patch('/api/teams/:id', async (c) => {
-    requireUser(c);
+    const user = requireUser(c);
     const body = await readJson(c);
-    const team = updateTeam(options.db, c.req.param('id'), {
+    const team = await updateTeam(options.db, user.id, c.req.param('id'), {
       name: body.name == null ? undefined : String(body.name),
       mission: body.mission == null ? undefined : String(body.mission),
       accent: body.accent == null ? undefined : String(body.accent),
     });
-    publish('bot.updated');
+    publish(user.id, 'bot.updated');
     return c.json(team);
   });
 
-  app.post('/api/teams/:id/archive', (c) => {
+  app.post('/api/teams/:id/archive', async (c) => {
     const user = requireUser(c);
-    const team = setTeamArchived(options.db, c.req.param('id'), true, user.email, now());
-    publish('bot.updated');
+    const team = await setTeamArchived(
+      options.db,
+      user.id,
+      c.req.param('id'),
+      true,
+      user.email,
+      now(),
+    );
+    publish(user.id, 'bot.updated');
     return c.json(team);
   });
 
-  app.post('/api/teams/:id/restore', (c) => {
+  app.post('/api/teams/:id/restore', async (c) => {
     const user = requireUser(c);
-    const team = setTeamArchived(options.db, c.req.param('id'), false, user.email, now());
-    publish('bot.updated');
+    const team = await setTeamArchived(
+      options.db,
+      user.id,
+      c.req.param('id'),
+      false,
+      user.email,
+      now(),
+    );
+    publish(user.id, 'bot.updated');
     return c.json(team);
   });
 
   app.post('/api/rooms', async (c) => {
-    requireUser(c);
+    const user = requireUser(c);
     const body = await readJson(c);
-    const room = createRoom(options.db, {
+    const room = await createRoom(options.db, user.id, {
       teamId: body.teamId ? String(body.teamId) : null,
       name: String(body.name ?? ''),
       kind: String(body.kind ?? ''),
     });
-    publish('bot.updated');
+    publish(user.id, 'bot.updated');
     return c.json(room, 201);
   });
 
   app.post('/api/bots', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const bot = createBot(
+    const bot = await createBot(
       options.db,
+      user.id,
       {
         name: String(body.name ?? ''),
         role: String(body.role ?? ''),
@@ -417,21 +491,22 @@ export function createApp(options: AppOptions) {
       user.email,
       now(),
     );
-    publish('bot.updated');
+    publish(user.id, 'bot.updated');
     return c.json(bot, 201);
   });
 
-  app.get('/api/bots/:id', (c) => {
-    requireUser(c);
-    const bot = getBot(options.db, c.req.param('id'), now());
-    return c.json({ bot, history: botHistory(options.db, bot.id) });
+  app.get('/api/bots/:id', async (c) => {
+    const user = requireUser(c);
+    const bot = await getBot(options.db, user.id, c.req.param('id'), now());
+    return c.json({ bot, history: await botHistory(options.db, user.id, bot.id) });
   });
 
   app.patch('/api/bots/:id', async (c) => {
-    requireUser(c);
+    const user = requireUser(c);
     const body = await readJson(c);
-    const bot = updateBot(
+    const bot = await updateBot(
       options.db,
+      user.id,
       c.req.param('id'),
       {
         name: body.name == null ? undefined : String(body.name),
@@ -443,45 +518,60 @@ export function createApp(options: AppOptions) {
       },
       now(),
     );
-    publish('bot.updated');
+    publish(user.id, 'bot.updated');
     return c.json(bot);
   });
 
   app.post('/api/bots/:id/status', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const bot = setBotStatus(
+    const bot = await setBotStatus(
       options.db,
+      user.id,
       c.req.param('id'),
       String(body.status ?? ''),
       String(body.note ?? ''),
       user.email,
       now(),
     );
-    publish('bot.updated');
+    publish(user.id, 'bot.updated');
     return c.json(bot);
   });
 
-  app.post('/api/bots/:id/archive', (c) => {
+  app.post('/api/bots/:id/archive', async (c) => {
     const user = requireUser(c);
-    const bot = setBotArchived(options.db, c.req.param('id'), true, user.email, now());
-    publish('bot.updated');
+    const bot = await setBotArchived(
+      options.db,
+      user.id,
+      c.req.param('id'),
+      true,
+      user.email,
+      now(),
+    );
+    publish(user.id, 'bot.updated');
     return c.json(bot);
   });
 
-  app.post('/api/bots/:id/restore', (c) => {
+  app.post('/api/bots/:id/restore', async (c) => {
     const user = requireUser(c);
-    const bot = setBotArchived(options.db, c.req.param('id'), false, user.email, now());
-    publish('bot.updated');
+    const bot = await setBotArchived(
+      options.db,
+      user.id,
+      c.req.param('id'),
+      false,
+      user.email,
+      now(),
+    );
+    publish(user.id, 'bot.updated');
     return c.json(bot);
   });
 
-  app.get('/api/packs', (c) => {
+  app.get('/api/packs', async (c) => {
     requireUser(c);
     return c.json(packSummaries());
   });
 
-  app.get('/api/packs/:id/consigne.md', (c) => {
+  app.get('/api/packs/:id/consigne.md', async (c) => {
     requireUser(c);
     const pack = packById(c.req.param('id'));
     if (!pack) return c.json({ error: 'Consigne introuvable.' }, 404);
@@ -493,35 +583,42 @@ export function createApp(options: AppOptions) {
     });
   });
 
-  app.post('/api/packs/:id/apply', (c) => {
+  app.post('/api/packs/:id/apply', async (c) => {
     const user = requireUser(c);
-    const team = applyPack(options.db, c.req.param('id'), user.email, now());
-    publish('bot.updated');
+    const team = await applyPack(options.db, user.id, c.req.param('id'), user.email, now());
+    publish(user.id, 'bot.updated');
     return c.json(team, 201);
   });
 
   app.post('/api/demo', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const settings = setDemoMode(options.db, body.enabled === true, user.email, now());
-    publish('bot.updated');
-    publish('usage.changed');
+    const settings = await setDemoMode(
+      options.db,
+      user.id,
+      body.enabled === true,
+      user.email,
+      now(),
+    );
+    publish(user.id, 'bot.updated');
+    publish(user.id, 'usage.changed');
     return c.json(settings);
   });
 
   app.patch('/api/settings', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const settings = writeSettings(
+    const settings = await writeSettings(
       options.db,
+      user.id,
       {
         retentionDays: body.retentionDays == null ? undefined : Number(body.retentionDays),
         staleMinutes: body.staleMinutes == null ? undefined : Number(body.staleMinutes),
       },
       now(),
     );
-    addAudit(options.db, user.email, 'settings', 'Réglages mis à jour.', now());
-    publish('bot.updated');
+    await addAudit(options.db, user.id, user.email, 'settings', 'Réglages mis à jour.', now());
+    publish(user.id, 'bot.updated');
     return c.json(settings);
   });
 
@@ -540,7 +637,7 @@ export function createApp(options: AppOptions) {
     const text = await file.text();
     const parsed = parseCsv(text);
     const mapping = suggestMapping(parsed.headers);
-    const id = saveStaging(
+    const id = await saveStaging(
       options.db,
       user.id,
       cleanFilename(file.name),
@@ -565,7 +662,7 @@ export function createApp(options: AppOptions) {
   app.post('/api/usage/interpret', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const staging = readStaging(options.db, String(body.stagingId ?? ''), user.id, now());
+    const staging = await readStaging(options.db, String(body.stagingId ?? ''), user.id, now());
     const mapping = sanitizeMapping(body.mapping);
     return c.json(
       buildPreview(
@@ -583,7 +680,7 @@ export function createApp(options: AppOptions) {
   app.post('/api/usage/commit', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const imported = commitStaging(
+    const imported = await commitStaging(
       options.db,
       String(body.stagingId ?? ''),
       user.id,
@@ -591,41 +688,42 @@ export function createApp(options: AppOptions) {
       user.email,
       now(),
     );
-    publish('usage.changed');
+    publish(user.id, 'usage.changed');
     return c.json(imported, 201);
   });
 
-  app.get('/api/usage/summary', (c) => {
-    requireUser(c);
-    return c.json(usageSummary(options.db, readQuery(c)));
+  app.get('/api/usage/summary', async (c) => {
+    const user = requireUser(c);
+    return c.json(await usageSummary(options.db, user.id, readQuery(c)));
   });
 
-  app.get('/api/usage/rows', (c) => {
-    requireUser(c);
-    const settings = readSettings(options.db);
+  app.get('/api/usage/rows', async (c) => {
+    const user = requireUser(c);
+    const settings = await readSettings(options.db, user.id);
     const limit = Math.min(200, Math.max(1, Number(c.req.query('limit') || 80)));
-    return c.json(listUsage(options.db, readQuery(c), settings.demoMode, limit, 0));
+    return c.json(await listUsage(options.db, user.id, readQuery(c), settings.demoMode, limit, 0));
   });
 
   app.post('/api/usage/rows/:id/assign', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const row = assignUsage(
+    const row = await assignUsage(
       options.db,
+      user.id,
       c.req.param('id'),
       body.botId ? String(body.botId) : null,
       String(body.note ?? ''),
       user.email,
       now(),
     );
-    publish('usage.changed');
+    publish(user.id, 'usage.changed');
     return c.json(row);
   });
 
-  app.delete('/api/usage/imports/:id', (c) => {
+  app.delete('/api/usage/imports/:id', async (c) => {
     const user = requireUser(c);
-    deleteImport(options.db, c.req.param('id'), user.email, now());
-    publish('usage.changed');
+    await deleteImport(options.db, user.id, c.req.param('id'), user.email, now());
+    publish(user.id, 'usage.changed');
     return c.json({ ok: true });
   });
 
@@ -634,14 +732,14 @@ export function createApp(options: AppOptions) {
     const body = await readJson(c);
     if (body.confirm !== 'EFFACER')
       return c.json({ error: 'Saisissez EFFACER pour confirmer.' }, 400);
-    resetUsage(options.db, user.email, now());
-    publish('usage.changed');
+    await resetUsage(options.db, user.id, user.email, now());
+    publish(user.id, 'usage.changed');
     return c.json({ ok: true });
   });
 
-  app.get('/api/usage/export.csv', (c) => {
-    requireUser(c);
-    const rows = exportRows(options.db, readQuery(c));
+  app.get('/api/usage/export.csv', async (c) => {
+    const user = requireUser(c);
+    const rows = await exportRows(options.db, user.id, readQuery(c));
     const csv = toCsv(
       [
         'Jour',
@@ -708,17 +806,18 @@ export function createApp(options: AppOptions) {
     });
   });
 
-  app.get('/api/tokens', (c) => {
-    requireUser(c);
-    return c.json(listTokens(options.db));
+  app.get('/api/tokens', async (c) => {
+    const user = requireUser(c);
+    return c.json(await listTokens(options.db, user.id));
   });
 
   app.post('/api/tokens', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
     const minted = newSecret('bc_');
-    const id = insertToken(
+    const id = await insertToken(
       options.db,
+      user.id,
       String(body.label ?? ''),
       minted.hash,
       minted.hint,
@@ -737,34 +836,37 @@ export function createApp(options: AppOptions) {
     );
   });
 
-  app.post('/api/tokens/:id/revoke', (c) => {
+  app.post('/api/tokens/:id/revoke', async (c) => {
     const user = requireUser(c);
-    revokeToken(options.db, c.req.param('id'), user.email, now());
+    await revokeToken(options.db, user.id, c.req.param('id'), user.email, now());
     return c.json({ ok: true });
   });
 
-  app.get('/api/events', (c) => {
-    requireUser(c);
-    return c.json(listEvents(options.db, readSettings(options.db).demoMode));
+  app.get('/api/events', async (c) => {
+    const user = requireUser(c);
+    return c.json(
+      await listEvents(options.db, user.id, (await readSettings(options.db, user.id)).demoMode),
+    );
   });
 
   app.post('/api/events/:id/materialize', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
-    const bot = materializeSignal(
+    const bot = await materializeSignal(
       options.db,
+      user.id,
       c.req.param('id'),
       String(body.name ?? ''),
       user.email,
       now(),
     );
-    publish('bot.updated');
-    publish('event.created');
+    publish(user.id, 'bot.updated');
+    publish(user.id, 'event.created');
     return c.json(bot, 201);
   });
 
-  app.get('/api/stream', (c) => {
-    requireUser(c);
+  app.get('/api/stream', async (c) => {
+    const user = requireUser(c);
     const encoder = new TextEncoder();
     let unsubscribe = () => {};
     const stream = new ReadableStream({
@@ -773,7 +875,7 @@ export function createApp(options: AppOptions) {
           controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
         };
         send('ready', { ok: true });
-        unsubscribe = subscribe(send);
+        unsubscribe = subscribe(user.id, send);
         c.req.raw.signal.addEventListener('abort', () => unsubscribe());
       },
       cancel() {
@@ -789,11 +891,11 @@ export function createApp(options: AppOptions) {
     });
   });
 
-  app.get('/api/webhooks', (c) => {
-    requireUser(c);
+  app.get('/api/webhooks', async (c) => {
+    const user = requireUser(c);
     return c.json({
       actions: webhooks.map((item) => ({ name: item.name })),
-      calls: listWebhookCalls(options.db),
+      calls: await listWebhookCalls(options.db, user.id),
       note: webhooks.length
         ? 'Une réponse HTTP 200 signifie demandé / en attente, pas une tâche terminée.'
         : 'Aucune action n’est configurée. Le contrôle distant reste désactivé : pas d’arrêt ni de suppression forcée.',
@@ -810,10 +912,11 @@ export function createApp(options: AppOptions) {
     if (body.confirm !== 'DEMANDER')
       return c.json({ error: 'Saisissez DEMANDER pour confirmer.' }, 400);
     const botId = body.botId ? String(body.botId) : null;
-    if (botId) getBot(options.db, botId, now());
-    if (recentWebhookCount(options.db, name, now()) >= 10) {
-      const blocked = insertWebhookCall(
+    if (botId) await getBot(options.db, user.id, botId, now());
+    if ((await recentWebhookCount(options.db, user.id, name, now())) >= 10) {
+      const blocked = await insertWebhookCall(
         options.db,
+        user.id,
         {
           action: name,
           botId,
@@ -860,13 +963,15 @@ export function createApp(options: AppOptions) {
       status = 'failed';
       detail = 'Appel impossible (délai dépassé, réseau ou adresse refusée).';
     }
-    const call = insertWebhookCall(
+    const call = await insertWebhookCall(
       options.db,
+      user.id,
       { action: name, botId, status, httpStatus, detail },
       now(),
     );
-    addAudit(
+    await addAudit(
       options.db,
+      user.id,
       user.email,
       'webhook',
       `${name} · ${status === 'requested' ? 'demandé / en attente' : 'échec'}`,
@@ -875,18 +980,18 @@ export function createApp(options: AppOptions) {
     return c.json(call, status === 'requested' ? 202 : 502);
   });
 
-  app.get('/api/audit', (c) => {
-    requireUser(c);
-    return c.json(listAudit(options.db));
+  app.get('/api/audit', async (c) => {
+    const user = requireUser(c);
+    return c.json(await listAudit(options.db, user.id));
   });
 
   app.post('/api/reset', async (c) => {
     const user = requireUser(c);
     const body = await readJson(c);
     if (body.confirm !== 'VIDER') return c.json({ error: 'Saisissez VIDER pour confirmer.' }, 400);
-    resetWorkshop(options.db, user.email, now());
-    publish('bot.updated');
-    publish('usage.changed');
+    await resetWorkshop(options.db, user.id, user.email, now());
+    publish(user.id, 'bot.updated');
+    publish(user.id, 'usage.changed');
     return c.json({ ok: true });
   });
 
@@ -905,11 +1010,12 @@ export function createApp(options: AppOptions) {
     const match = /^Bearer\s+(.+)$/i.exec(header.trim());
     const secret = match?.[1]?.trim() ?? '';
     if (!secret) return c.json({ error: 'Jeton Bearer requis.' }, 401);
-    const token = authenticateToken(options.db, secret);
+    const token = await authenticateToken(options.db, secret);
     if (!token) return c.json({ error: 'Jeton refusé.' }, 401);
     if (!allow(`mcp:${token.id}`, 180, 60_000))
       return c.json({ error: 'Trop de signalements.' }, 429);
-    touchToken(options.db, token.id, now());
+    mcpOwners.set(token.id, token.userId);
+    await touchToken(options.db, token.id, now());
     return mcp.fetch(c.req.raw, {
       authInfo: { token: 'present', clientId: token.id, scopes: ['report'] },
     });
@@ -944,11 +1050,10 @@ export function createApp(options: AppOptions) {
     });
   }
 
-  applyRetention(options.db, now());
-
-  function subscribe(listener: (event: string, data: unknown) => void) {
-    listeners.add(listener);
-    return () => listeners.delete(listener);
+  function subscribe(userId: string, listener: (event: string, data: unknown) => void) {
+    const entry = { userId, fn: listener };
+    listeners.add(entry);
+    return () => listeners.delete(entry);
   }
 
   function setSession(c: Parameters<typeof setCookie>[0], token: string) {

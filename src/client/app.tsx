@@ -5,6 +5,7 @@ import { Field } from './ui';
 
 type Boot = {
   needsSetup: boolean;
+  allowSignup?: boolean;
   setupRequiresToken: boolean;
   openSetup: boolean;
   ephemeralStorage?: boolean;
@@ -69,8 +70,9 @@ export function App() {
         onLogout={() => setEmail(null)}
       />
     );
-  if (boot.needsSetup) return <Setup boot={boot} onDone={(next) => setEmail(next)} />;
-  return <Login onDone={(next) => setEmail(next)} />;
+  if (boot.needsSetup && !boot.allowSignup)
+    return <Setup boot={boot} onDone={(next) => setEmail(next)} />;
+  return <Login allowSignup={boot.allowSignup !== false} onDone={(next) => setEmail(next)} />;
 }
 
 function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }) {
@@ -96,15 +98,14 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
         }}
       >
         <p class="kicker">Bot Cockpit</p>
-        <h1>Premier propriétaire</h1>
+        <h1>Premier espace</h1>
         <p class="lede">
-          L’atelier démarre vide. Aucune fiche, aucun usage et aucune économie ne sont inventés. Un
-          seul compte local ouvre ensuite le bureau.
+          L’atelier démarre vide. Chaque compte a son propre espace, isolé des autres. Aucune fiche,
+          aucun usage et aucune économie ne sont inventés.
         </p>
         {boot.ephemeralStorage && (
           <p class="note" role="status">
-            Hébergement Vercel : la base SQLite est temporaire (/tmp) et se réinitialise aux
-            redémarrages à froid. Pour des données persistantes, utilisez Docker Compose / DevForge.
+            Stockage temporaire : les données peuvent disparaître au prochain redémarrage à froid.
           </p>
         )}
         {boot.openSetup && (
@@ -147,10 +148,12 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
   );
 }
 
-function Login({ onDone }: { onDone: (email: string) => void }) {
+function Login({ allowSignup, onDone }: { allowSignup: boolean; onDone: (email: string) => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [error, setError] = useState('');
+  const signup = mode === 'signup';
   return (
     <div class="auth-screen">
       <form
@@ -158,19 +161,29 @@ function Login({ onDone }: { onDone: (email: string) => void }) {
         onSubmit={(event) => {
           event.preventDefault();
           setError('');
-          void api<{ email: string }>('/api/login', {
+          void api<{ email: string }>(signup ? '/api/signup' : '/api/login', {
             method: 'POST',
             body: JSON.stringify({ email, password }),
           })
             .then((body) => onDone(body.email))
             .catch((caught) =>
-              setError(caught instanceof Error ? caught.message : 'Connexion impossible.'),
+              setError(
+                caught instanceof Error
+                  ? caught.message
+                  : signup
+                    ? 'Inscription impossible.'
+                    : 'Connexion impossible.',
+              ),
             );
         }}
       >
         <p class="kicker">Bot Cockpit</p>
-        <h1>Reprendre l’atelier</h1>
-        <p class="lede">Session du propriétaire. Aucun compte externe n’est interrogé.</p>
+        <h1>{signup ? 'Créer votre espace' : 'Reprendre l’atelier'}</h1>
+        <p class="lede">
+          {signup
+            ? 'Chaque adresse ouvre un espace isolé. Aucun compte externe n’est interrogé.'
+            : 'Session de votre espace. Aucun compte externe n’est interrogé.'}
+        </p>
         {error && <p class="error">{error}</p>}
         <Field label="Adresse électronique">
           <input
@@ -180,17 +193,30 @@ function Login({ onDone }: { onDone: (email: string) => void }) {
             required
           />
         </Field>
-        <Field label="Mot de passe">
+        <Field label={signup ? 'Mot de passe (12 caractères minimum)' : 'Mot de passe'}>
           <input
             type="password"
             value={password}
             onInput={(event) => setPassword(event.currentTarget.value)}
             required
+            minLength={signup ? 12 : undefined}
           />
         </Field>
         <button class="btn primary" type="submit">
-          Entrer
+          {signup ? 'Créer l’espace' : 'Entrer'}
         </button>
+        {allowSignup && (
+          <button
+            class="btn"
+            type="button"
+            onClick={() => {
+              setError('');
+              setMode(signup ? 'login' : 'signup');
+            }}
+          >
+            {signup ? 'J’ai déjà un espace' : 'Créer un nouvel espace'}
+          </button>
+        )}
       </form>
     </div>
   );

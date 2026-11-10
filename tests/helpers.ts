@@ -1,11 +1,12 @@
 import { type AppOptions, createApp } from '../src/server/app.js';
 import { type DB, openDatabase } from '../src/server/db.js';
 
-export function testApp(extra: Partial<AppOptions> = {}) {
-  const db = openDatabase(':memory:');
+export async function testApp(extra: Partial<AppOptions> = {}) {
+  const db = await openDatabase(':memory:');
   const created = createApp({
     db,
     allowOpenSetup: true,
+    allowSignup: true,
     rateLimit: false,
     serveClient: false,
     ...extra,
@@ -14,7 +15,7 @@ export function testApp(extra: Partial<AppOptions> = {}) {
 }
 
 export async function ownerCookie(
-  app: ReturnType<typeof testApp>['app'],
+  app: Awaited<ReturnType<typeof testApp>>['app'],
   email = 'owner@atelier.test',
 ): Promise<string> {
   const response = await app.request('/api/setup', {

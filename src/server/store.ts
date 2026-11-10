@@ -17,7 +17,7 @@ import {
   type Workspace,
 } from '../shared/types.js';
 import { assertMapping, interpretRows, type UsageDraft } from './csv.js';
-import { all, type DB, get, run, transaction } from './db.js';
+import { adoptOrphanedWorkspace, all, type DB, get, run, transaction } from './db.js';
 import { summarizeUsage } from './insights.js';
 import {
   flag,
@@ -46,14 +46,14 @@ const ROOM_SLOTS: Array<[number, number]> = [
 
 export type SessionUser = { id: string; email: string; sessionId: string };
 
-export function purgeExpired(db: DB, now: Date): void {
+export async function purgeExpired(db: DB, now: Date): Promise<void> {
   const iso = now.toISOString();
-  run(db, 'DELETE FROM sessions WHERE expires_at < ?', iso);
-  run(db, 'DELETE FROM upload_staging WHERE expires_at < ?', iso);
+  await run(db, 'DELETE FROM sessions WHERE expires_at < ?', iso);
+  await run(db, 'DELETE FROM upload_staging WHERE expires_at < ?', iso);
 }
 
-export function readSettings(db: DB): Settings {
-  const rows = all<Row>(db, 'SELECT key, value FROM settings');
+export async function readSettings(db: DB, userId: string): Promise<Settings> {
+  const rows = await all<Row>(db, 'SELECT key, value FROM settings WHERE user_id = ?', userId);
   const map = new Map(rows.map((row) => [str(row, 'key'), str(row, 'value')]));
   return {
     demoMode: map.get('demo_mode') === '1',
@@ -62,48 +62,65 @@ export function readSettings(db: DB): Settings {
   };
 }
 
-export function writeSettings(
+export async function writeSettings(
   db: DB,
+  userId: string,
   patch: { retentionDays?: number; staleMinutes?: number },
   now: Date,
-): Settings {
+): Promise<Settings> {
   if (patch.retentionDays != null) {
     const days = clamp(String(patch.retentionDays), 0, 3650, 0);
-    run(
+    await run(
       db,
-      `INSERT INTO settings (key, value) VALUES ('retention_days', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      `INSERT INTO settings (user_id, key, value) VALUES (?, 'retention_days', ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`,
+      userId,
       String(days),
     );
   }
   if (patch.staleMinutes != null) {
     const minutes = clamp(String(patch.staleMinutes), 1, 10_080, 30);
-    run(
+    await run(
       db,
-      `INSERT INTO settings (key, value) VALUES ('stale_minutes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      `INSERT INTO settings (user_id, key, value) VALUES (?, 'stale_minutes', ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`,
+      userId,
       String(minutes),
     );
   }
-  applyRetention(db, now);
-  return readSettings(db);
+  await applyRetention(db, userId, now);
+  return await readSettings(db, userId);
 }
 
-export function applyRetention(db: DB, now: Date): void {
-  const days = readSettings(db).retentionDays;
+export async function applyRetention(db: DB, userId: string, now: Date): Promise<void> {
+  const days = (await readSettings(db, userId)).retentionDays;
   if (days <= 0) return;
   const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
-  run(
+  await run(
     db,
-    'DELETE FROM usage_rows WHERE is_demo = 0 AND occurred_at IS NOT NULL AND occurred_at < ?',
+    'DELETE FROM usage_rows WHERE user_id = ? AND is_demo = 0 AND occurred_at IS NOT NULL AND occurred_at < ?',
+    userId,
     cutoff,
   );
-  run(db, 'DELETE FROM events WHERE is_demo = 0 AND occurred_at < ?', cutoff);
+  await run(
+    db,
+    'DELETE FROM events WHERE user_id = ? AND is_demo = 0 AND occurred_at < ?',
+    userId,
+    cutoff,
+  );
 }
 
-export function addAudit(db: DB, actor: string, action: string, detail: string, now: Date): void {
-  run(
+export async function addAudit(
+  db: DB,
+  userId: string,
+  actor: string,
+  action: string,
+  detail: string,
+  now: Date,
+): Promise<void> {
+  await run(
     db,
-    'INSERT INTO audit (id, actor, action, detail, created_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO audit (id, user_id, actor, action, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     newId(),
+    userId,
     actor,
     action,
     cleanText(detail, 400),
@@ -111,8 +128,14 @@ export function addAudit(db: DB, actor: string, action: string, detail: string, 
   );
 }
 
-export function listAudit(db: DB): AuditEntry[] {
-  return all<Row>(db, 'SELECT * FROM audit ORDER BY created_at DESC LIMIT 80').map((row) => ({
+export async function listAudit(db: DB, userId: string): Promise<AuditEntry[]> {
+  return (
+    await all<Row>(
+      db,
+      'SELECT * FROM audit WHERE user_id = ? ORDER BY created_at DESC LIMIT 80',
+      userId,
+    )
+  ).map((row) => ({
     id: str(row, 'id'),
     actor: str(row, 'actor'),
     action: str(row, 'action'),
@@ -121,20 +144,20 @@ export function listAudit(db: DB): AuditEntry[] {
   }));
 }
 
-export function userCount(db: DB): number {
-  const row = get<Row>(db, 'SELECT COUNT(*) AS n FROM users');
+export async function userCount(db: DB): Promise<number> {
+  const row = await get<Row>(db, 'SELECT COUNT(*) AS n FROM users');
   return Number(row?.n ?? 0);
 }
 
-export function createOwner(
+export async function createOwner(
   db: DB,
   email: string,
   passwordHash: string,
   now: Date,
-): SessionUser & { token: string } {
-  if (userCount(db) > 0) throw new HttpError(409, 'Le propriétaire est déjà configuré.');
+): Promise<SessionUser & { token: string }> {
+  if ((await userCount(db)) > 0) throw new HttpError(409, 'Le propriétaire est déjà configuré.');
   const id = newId();
-  run(
+  await run(
     db,
     'INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)',
     id,
@@ -142,29 +165,67 @@ export function createOwner(
     passwordHash,
     now.toISOString(),
   );
-  addAudit(db, email, 'setup', 'Propriétaire créé.', now);
-  return openSession(db, id, email, now);
+  await adoptOrphanedWorkspace(db, id);
+  await addAudit(db, id, email, 'setup', 'Propriétaire créé.', now);
+  return await openSession(db, id, email, now);
 }
 
-export function findOwnerByEmail(
+export async function createUser(
   db: DB,
   email: string,
-): { id: string; email: string; passwordHash: string } | null {
-  const row = get<Row>(db, 'SELECT * FROM users WHERE email = ?', email);
+  passwordHash: string,
+  now: Date,
+): Promise<SessionUser & { token: string }> {
+  const existing = await get<Row>(db, 'SELECT id FROM users WHERE email = ?', email);
+  if (existing) throw new HttpError(409, 'Un espace existe déjà pour cette adresse.');
+  const id = newId();
+  try {
+    await run(
+      db,
+      'INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)',
+      id,
+      email,
+      passwordHash,
+      now.toISOString(),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (/unique|constraint/i.test(message)) {
+      throw new HttpError(409, 'Un espace existe déjà pour cette adresse.');
+    }
+    throw error;
+  }
+  if ((await userCount(db)) === 1) {
+    await adoptOrphanedWorkspace(db, id);
+  }
+  await addAudit(db, id, email, 'signup', 'Espace utilisateur créé.', now);
+  return await openSession(db, id, email, now);
+}
+
+export async function deleteUser(db: DB, userId: string): Promise<void> {
+  const changed = await run(db, 'DELETE FROM users WHERE id = ?', userId);
+  if (!changed) throw new HttpError(404, 'Compte introuvable.');
+}
+
+export async function findOwnerByEmail(
+  db: DB,
+  email: string,
+): Promise<{ id: string; email: string; passwordHash: string } | null> {
+  const row = await get<Row>(db, 'SELECT * FROM users WHERE email = ?', email);
   if (!row) return null;
   return { id: str(row, 'id'), email: str(row, 'email'), passwordHash: str(row, 'password_hash') };
 }
 
-export function openSession(
+export async function openSession(
   db: DB,
   userId: string,
   email: string,
   now: Date,
-): SessionUser & { token: string } {
+): Promise<SessionUser & { token: string }> {
   const token = newId() + newId();
   const id = newId();
   const expires = new Date(now.getTime() + 14 * 86_400_000).toISOString();
-  run(
+  await run(
     db,
     'INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
     id,
@@ -176,8 +237,8 @@ export function openSession(
   return { id: userId, email, sessionId: id, token };
 }
 
-export function userFromToken(db: DB, token: string, now: Date): SessionUser | null {
-  const row = get<Row>(
+export async function userFromToken(db: DB, token: string, now: Date): Promise<SessionUser | null> {
+  const row = await get<Row>(
     db,
     `SELECT sessions.id AS session_id, sessions.expires_at, users.id, users.email
      FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ?`,
@@ -185,70 +246,95 @@ export function userFromToken(db: DB, token: string, now: Date): SessionUser | n
   );
   if (!row) return null;
   if (str(row, 'expires_at') < now.toISOString()) {
-    run(db, 'DELETE FROM sessions WHERE id = ?', str(row, 'session_id'));
+    await run(db, 'DELETE FROM sessions WHERE id = ?', str(row, 'session_id'));
     return null;
   }
   return { id: str(row, 'id'), email: str(row, 'email'), sessionId: str(row, 'session_id') };
 }
 
-export function deleteSession(db: DB, sessionId: string): void {
-  run(db, 'DELETE FROM sessions WHERE id = ?', sessionId);
+export async function deleteSession(db: DB, sessionId: string): Promise<void> {
+  await run(db, 'DELETE FROM sessions WHERE id = ?', sessionId);
 }
 
-export function workspace(db: DB, now: Date): Workspace {
-  const settings = readSettings(db);
+export async function workspace(db: DB, userId: string, now: Date): Promise<Workspace> {
+  const settings = await readSettings(db, userId);
   const demo = settings.demoMode ? 1 : 0;
-  const teams = all<Row>(
-    db,
-    'SELECT * FROM teams WHERE (? = 1 OR is_demo = 0) ORDER BY created_at',
-    demo,
+  const teams = (
+    await all<Row>(
+      db,
+      'SELECT * FROM teams WHERE user_id = ? AND (? = 1 OR is_demo = 0) ORDER BY created_at',
+      userId,
+      demo,
+    )
   ).map(mapTeam);
-  const rooms = all<Row>(db, 'SELECT * FROM rooms WHERE (? = 1 OR is_demo = 0)', demo).map(mapRoom);
-  const bots = all<Row>(
-    db,
-    'SELECT * FROM bots WHERE (? = 1 OR is_demo = 0) ORDER BY name',
-    demo,
+  const rooms = (
+    await all<Row>(
+      db,
+      'SELECT * FROM rooms WHERE user_id = ? AND (? = 1 OR is_demo = 0)',
+      userId,
+      demo,
+    )
+  ).map(mapRoom);
+  const bots = (
+    await all<Row>(
+      db,
+      'SELECT * FROM bots WHERE user_id = ? AND (? = 1 OR is_demo = 0) ORDER BY name',
+      userId,
+      demo,
+    )
   ).map((row) => mapBot(row, now, settings.staleMinutes));
-  const signals = all<Row>(
-    db,
-    'SELECT * FROM events WHERE (? = 1 OR is_demo = 0) ORDER BY occurred_at DESC LIMIT 40',
-    demo,
+  const signals = (
+    await all<Row>(
+      db,
+      'SELECT * FROM events WHERE user_id = ? AND (? = 1 OR is_demo = 0) ORDER BY occurred_at DESC LIMIT 40',
+      userId,
+      demo,
+    )
   ).map(mapSignal);
-  const imports = all<Row>(db, 'SELECT * FROM imports ORDER BY created_at DESC LIMIT 30').map(
-    mapImport,
-  );
+  const imports = (
+    await all<Row>(
+      db,
+      'SELECT * FROM imports WHERE user_id = ? ORDER BY created_at DESC LIMIT 30',
+      userId,
+    )
+  ).map(mapImport);
   return { settings, teams, rooms, bots, signals, imports, webhookActions: [] };
 }
 
-export function createTeam(
+export async function createTeam(
   db: DB,
+  userId: string,
   input: { name: string; mission: string; accent: string },
   actor: string,
   now: Date,
-): Team {
+): Promise<Team> {
   const name = required(input.name, 80, 'Nom d’équipe requis.');
   const accent = assertAccent(input.accent || ACCENTS[0]);
   const id = newId();
-  run(
+  await run(
     db,
-    'INSERT INTO teams (id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+    'INSERT INTO teams (id, user_id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)',
     id,
+    userId,
     name,
     cleanText(input.mission, 400),
     accent,
     'manual',
     now.toISOString(),
   );
-  addAudit(db, actor, 'team.create', name, now);
-  return mapTeam(get<Row>(db, 'SELECT * FROM teams WHERE id = ?', id)!);
+  await addAudit(db, userId, actor, 'team.create', name, now);
+  return mapTeam(
+    (await get<Row>(db, 'SELECT * FROM teams WHERE id = ? AND user_id = ?', id, userId))!,
+  );
 }
 
-export function updateTeam(
+export async function updateTeam(
   db: DB,
+  userId: string,
   id: string,
   input: { name?: string; mission?: string; accent?: string },
-): Team {
-  const current = mustTeam(db, id);
+): Promise<Team> {
+  const current = await mustTeam(db, userId, id);
   if (current.isDemo)
     throw new HttpError(
       400,
@@ -257,59 +343,76 @@ export function updateTeam(
   const name = input.name != null ? required(input.name, 80, 'Nom d’équipe requis.') : current.name;
   const mission = input.mission != null ? cleanText(input.mission, 400) : current.mission;
   const accent = input.accent != null ? assertAccent(input.accent) : current.accent;
-  run(
+  await run(
     db,
-    'UPDATE teams SET name = ?, mission = ?, accent = ? WHERE id = ?',
+    'UPDATE teams SET name = ?, mission = ?, accent = ? WHERE id = ? AND user_id = ?',
     name,
     mission,
     accent,
     id,
+    userId,
   );
-  return mapTeam(get<Row>(db, 'SELECT * FROM teams WHERE id = ?', id)!);
+  return mapTeam(
+    (await get<Row>(db, 'SELECT * FROM teams WHERE id = ? AND user_id = ?', id, userId))!,
+  );
 }
 
-export function setTeamArchived(
+export async function setTeamArchived(
   db: DB,
+  userId: string,
   id: string,
   archived: boolean,
   actor: string,
   now: Date,
-): Team {
-  const current = mustTeam(db, id);
+): Promise<Team> {
+  const current = await mustTeam(db, userId, id);
   if (current.isDemo)
     throw new HttpError(
       400,
       'Les fiches de démonstration se retirent en quittant la démonstration.',
     );
-  run(db, 'UPDATE teams SET archived_at = ? WHERE id = ?', archived ? now.toISOString() : null, id);
-  addAudit(db, actor, archived ? 'team.archive' : 'team.restore', current.name, now);
-  return mapTeam(get<Row>(db, 'SELECT * FROM teams WHERE id = ?', id)!);
+  await run(
+    db,
+    'UPDATE teams SET archived_at = ? WHERE id = ? AND user_id = ?',
+    archived ? now.toISOString() : null,
+    id,
+    userId,
+  );
+  await addAudit(db, userId, actor, archived ? 'team.archive' : 'team.restore', current.name, now);
+  return mapTeam(
+    (await get<Row>(db, 'SELECT * FROM teams WHERE id = ? AND user_id = ?', id, userId))!,
+  );
 }
 
-export function createRoom(
+export async function createRoom(
   db: DB,
+  userId: string,
   input: { teamId: string | null; name: string; kind: string },
-): ReturnType<typeof mapRoom> {
+): Promise<ReturnType<typeof mapRoom>> {
   const name = required(input.name, 80, 'Nom de salle requis.');
   const kind = assertKind(input.kind);
-  if (input.teamId) mustTeam(db, input.teamId);
-  const [gridX, gridY] = nextSlot(db);
+  if (input.teamId) await mustTeam(db, userId, input.teamId);
+  const [gridX, gridY] = await nextSlot(db, userId);
   const id = newId();
-  run(
+  await run(
     db,
-    'INSERT INTO rooms (id, team_id, name, kind, grid_x, grid_y, is_demo) VALUES (?, ?, ?, ?, ?, ?, 0)',
+    'INSERT INTO rooms (id, user_id, team_id, name, kind, grid_x, grid_y, is_demo) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
     id,
+    userId,
     input.teamId,
     name,
     kind,
     gridX,
     gridY,
   );
-  return mapRoom(get<Row>(db, 'SELECT * FROM rooms WHERE id = ?', id)!);
+  return mapRoom(
+    (await get<Row>(db, 'SELECT * FROM rooms WHERE id = ? AND user_id = ?', id, userId))!,
+  );
 }
 
-export function createBot(
+export async function createBot(
   db: DB,
+  userId: string,
   input: {
     name: string;
     role: string;
@@ -321,20 +424,21 @@ export function createBot(
   },
   actor: string,
   now: Date,
-): Bot {
+): Promise<Bot> {
   const name = required(input.name, 80, 'Nom de fiche requis.');
   const status = assertStatus(input.status || 'offline');
-  assertLinks(db, input.teamId, input.roomId, false);
+  await assertLinks(db, userId, input.teamId, input.roomId, false);
   const externalKey = cleanText(input.externalKey, 120);
-  assertExternalKey(db, externalKey, null);
+  await assertExternalKey(db, userId, externalKey, null);
   const id = newId();
   const iso = now.toISOString();
   const seen = status === 'offline' ? null : iso;
-  run(
+  await run(
     db,
-    `INSERT INTO bots (id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, 0, 'manual', ?, ?)`,
+    `INSERT INTO bots (id, user_id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 0, 'manual', ?, ?)`,
     id,
+    userId,
     externalKey,
     name,
     cleanText(input.role, 80),
@@ -346,22 +450,24 @@ export function createBot(
     iso,
     iso,
   );
-  run(
+  await run(
     db,
-    'INSERT INTO bot_history (id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO bot_history (id, user_id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     newId(),
+    userId,
     id,
     status,
     'Création manuelle',
     'manual',
     iso,
   );
-  addAudit(db, actor, 'bot.create', name, now);
-  return getBot(db, id, now);
+  await addAudit(db, userId, actor, 'bot.create', name, now);
+  return await getBot(db, userId, id, now);
 }
 
-export function updateBot(
+export async function updateBot(
   db: DB,
+  userId: string,
   id: string,
   input: {
     name?: string;
@@ -372,8 +478,8 @@ export function updateBot(
     externalKey?: string;
   },
   now: Date,
-): Bot {
-  const current = getBot(db, id, now);
+): Promise<Bot> {
+  const current = await getBot(db, userId, id, now);
   if (current.isDemo)
     throw new HttpError(
       400,
@@ -381,13 +487,13 @@ export function updateBot(
     );
   const teamId = input.teamId === undefined ? current.teamId : input.teamId;
   const roomId = input.roomId === undefined ? current.roomId : input.roomId;
-  assertLinks(db, teamId, roomId, false);
+  await assertLinks(db, userId, teamId, roomId, false);
   const externalKey =
     input.externalKey === undefined ? current.externalKey : cleanText(input.externalKey, 120);
-  assertExternalKey(db, externalKey, id);
-  run(
+  await assertExternalKey(db, userId, externalKey, id);
+  await run(
     db,
-    `UPDATE bots SET name = ?, role = ?, brief = ?, team_id = ?, room_id = ?, external_key = ?, updated_at = ? WHERE id = ?`,
+    `UPDATE bots SET name = ?, role = ?, brief = ?, team_id = ?, room_id = ?, external_key = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
     input.name != null ? required(input.name, 80, 'Nom de fiche requis.') : current.name,
     input.role != null ? cleanText(input.role, 80) : current.role,
     input.brief != null ? cleanBlock(input.brief, 2000) : current.brief,
@@ -396,128 +502,154 @@ export function updateBot(
     externalKey,
     now.toISOString(),
     id,
+    userId,
   );
-  return getBot(db, id, now);
+  return await getBot(db, userId, id, now);
 }
 
-export function setBotStatus(
+export async function setBotStatus(
   db: DB,
+  userId: string,
   id: string,
   status: string,
   note: string,
   actor: string,
   now: Date,
-): Bot {
-  const current = getBot(db, id, now);
+): Promise<Bot> {
+  const current = await getBot(db, userId, id, now);
   if (current.isDemo)
     throw new HttpError(400, 'Les fiches de démonstration ne reçoivent pas de statut réel.');
   const next = assertStatus(status);
   const iso = now.toISOString();
   const cleanNote = cleanText(note, 500);
-  run(
+  await run(
     db,
-    'UPDATE bots SET status = ?, status_note = ?, last_seen_at = ?, updated_at = ? WHERE id = ?',
+    'UPDATE bots SET status = ?, status_note = ?, last_seen_at = ?, updated_at = ? WHERE id = ? AND user_id = ?',
     next,
     cleanNote,
     iso,
     iso,
     id,
+    userId,
   );
-  run(
+  await run(
     db,
-    'INSERT INTO bot_history (id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO bot_history (id, user_id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     newId(),
+    userId,
     id,
     next,
     cleanNote || 'Mise à jour manuelle',
     'manual',
     iso,
   );
-  addAudit(db, actor, 'bot.status', `${current.name} → ${next}`, now);
-  return getBot(db, id, now);
+  await addAudit(db, userId, actor, 'bot.status', `${current.name} → ${next}`, now);
+  return await getBot(db, userId, id, now);
 }
 
-export function setBotArchived(
+export async function setBotArchived(
   db: DB,
+  userId: string,
   id: string,
   archived: boolean,
   actor: string,
   now: Date,
-): Bot {
-  const current = getBot(db, id, now);
+): Promise<Bot> {
+  const current = await getBot(db, userId, id, now);
   if (current.isDemo)
     throw new HttpError(
       400,
       'Les fiches de démonstration se retirent en quittant la démonstration.',
     );
-  run(
+  await run(
     db,
-    'UPDATE bots SET archived_at = ?, updated_at = ? WHERE id = ?',
+    'UPDATE bots SET archived_at = ?, updated_at = ? WHERE id = ? AND user_id = ?',
     archived ? now.toISOString() : null,
     now.toISOString(),
     id,
+    userId,
   );
-  addAudit(db, actor, archived ? 'bot.archive' : 'bot.restore', current.name, now);
-  return getBot(db, id, now);
+  await addAudit(db, userId, actor, archived ? 'bot.archive' : 'bot.restore', current.name, now);
+  return await getBot(db, userId, id, now);
 }
 
-export function getBot(db: DB, id: string, now: Date): Bot {
-  const row = get<Row>(db, 'SELECT * FROM bots WHERE id = ?', id);
+export async function getBot(db: DB, userId: string, id: string, now: Date): Promise<Bot> {
+  const row = await get<Row>(db, 'SELECT * FROM bots WHERE id = ? AND user_id = ?', id, userId);
   if (!row) throw new HttpError(404, 'Fiche introuvable.');
-  return mapBot(row, now, readSettings(db).staleMinutes);
+  return mapBot(row, now, (await readSettings(db, userId)).staleMinutes);
 }
 
-export function botHistory(db: DB, id: string): HistoryEntry[] {
-  return all<Row>(
-    db,
-    'SELECT * FROM bot_history WHERE bot_id = ? ORDER BY occurred_at DESC LIMIT 40',
-    id,
+export async function botHistory(db: DB, userId: string, id: string): Promise<HistoryEntry[]> {
+  return (
+    await all<Row>(
+      db,
+      'SELECT * FROM bot_history WHERE bot_id = ? AND user_id = ? ORDER BY occurred_at DESC LIMIT 40',
+      id,
+      userId,
+    )
   ).map(mapHistory);
 }
 
-export function applyPack(db: DB, packId: string, actor: string, now: Date): Team {
+export async function applyPack(
+  db: DB,
+  userId: string,
+  packId: string,
+  actor: string,
+  now: Date,
+): Promise<Team> {
   const pack = packById(packId);
   if (!pack) throw new HttpError(404, 'Consigne introuvable.');
   const existing = Number(
-    get<Row>(db, 'SELECT COUNT(*) AS n FROM teams WHERE origin = ?', `pack:${pack.id}`)?.n ?? 0,
+    (
+      await get<Row>(
+        db,
+        'SELECT COUNT(*) AS n FROM teams WHERE user_id = ? AND origin = ?',
+        userId,
+        `pack:${pack.id}`,
+      )
+    )?.n ?? 0,
   );
   const suffix = existing === 0 ? '' : ` ${existing + 1}`;
-  return transaction(db, () => {
+  return await transaction(db, async () => {
     const teamId = newId();
     const iso = now.toISOString();
-    run(
+    await run(
       db,
-      'INSERT INTO teams (id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+      'INSERT INTO teams (id, user_id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)',
       teamId,
+      userId,
       `${pack.name}${suffix}`,
       pack.mission,
       pack.accent,
       `pack:${pack.id}`,
       iso,
     );
-    const roomIds = pack.rooms.map((room) => {
-      const [gridX, gridY] = nextSlot(db);
+    const roomIds: string[] = [];
+    for (const room of pack.rooms) {
+      const [gridX, gridY] = await nextSlot(db, userId);
       const id = newId();
-      run(
+      await run(
         db,
-        'INSERT INTO rooms (id, team_id, name, kind, grid_x, grid_y, is_demo) VALUES (?, ?, ?, ?, ?, ?, 0)',
+        'INSERT INTO rooms (id, user_id, team_id, name, kind, grid_x, grid_y, is_demo) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
         id,
+        userId,
         teamId,
         room.name,
         room.kind,
         gridX,
         gridY,
       );
-      return id;
-    });
-    pack.bots.forEach((bot, index) => {
+      roomIds.push(id);
+    }
+    for (const [index, bot] of pack.bots.entries()) {
       const id = newId();
       const roomId = roomIds[index % roomIds.length] ?? null;
-      run(
+      await run(
         db,
-        `INSERT INTO bots (id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
-         VALUES (?, '', ?, ?, ?, ?, ?, 'offline', '', NULL, 0, ?, ?, ?)`,
+        `INSERT INTO bots (id, user_id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, 'offline', '', NULL, 0, ?, ?, ?)`,
         id,
+        userId,
         bot.name,
         bot.role,
         bot.brief,
@@ -527,33 +659,50 @@ export function applyPack(db: DB, packId: string, actor: string, now: Date): Tea
         iso,
         iso,
       );
-    });
-    addAudit(db, actor, 'pack.apply', `${pack.name} — fiches manuelles, aucun code exécuté.`, now);
-    return mapTeam(get<Row>(db, 'SELECT * FROM teams WHERE id = ?', teamId)!);
+    }
+    await addAudit(
+      db,
+      userId,
+      actor,
+      'pack.apply',
+      `${pack.name} — fiches manuelles, aucun code exécuté.`,
+      now,
+    );
+    return mapTeam(
+      (await get<Row>(db, 'SELECT * FROM teams WHERE id = ? AND user_id = ?', teamId, userId))!,
+    );
   });
 }
 
-export function setDemoMode(db: DB, enabled: boolean, actor: string, now: Date): Settings {
-  transaction(db, () => {
-    clearDemo(db);
-    if (enabled) seedDemo(db, now);
-    run(
+export async function setDemoMode(
+  db: DB,
+  userId: string,
+  enabled: boolean,
+  actor: string,
+  now: Date,
+): Promise<Settings> {
+  await transaction(db, async () => {
+    await clearDemo(db, userId);
+    if (enabled) await seedDemo(db, userId, now);
+    await run(
       db,
-      `INSERT INTO settings (key, value) VALUES ('demo_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      `INSERT INTO settings (user_id, key, value) VALUES (?, 'demo_mode', ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`,
+      userId,
       enabled ? '1' : '0',
     );
-    addAudit(
+    await addAudit(
       db,
+      userId,
       actor,
       enabled ? 'demo.on' : 'demo.off',
       enabled ? 'Données de démonstration activées.' : 'Données de démonstration retirées.',
       now,
     );
   });
-  return readSettings(db);
+  return await readSettings(db, userId);
 }
 
-export function saveStaging(
+export async function saveStaging(
   db: DB,
   userId: string,
   filename: string,
@@ -561,12 +710,12 @@ export function saveStaging(
   records: string[][],
   errors: Array<{ line: number; message: string }>,
   now: Date,
-): string {
+): Promise<string> {
   const iso = now.toISOString();
-  run(db, 'DELETE FROM upload_staging WHERE expires_at < ?', iso);
+  await run(db, 'DELETE FROM upload_staging WHERE expires_at < ?', iso);
   const id = newId();
   const expires = new Date(now.getTime() + 30 * 60_000).toISOString();
-  run(
+  await run(
     db,
     `INSERT INTO upload_staging (id, user_id, filename, headers_json, records_json, errors_json, created_at, expires_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -582,18 +731,23 @@ export function saveStaging(
   return id;
 }
 
-export function readStaging(
+export async function readStaging(
   db: DB,
   id: string,
   userId: string,
   now: Date,
-): {
+): Promise<{
   filename: string;
   headers: string[];
   records: string[][];
   errors: Array<{ line: number; message: string }>;
-} {
-  const row = get<Row>(db, 'SELECT * FROM upload_staging WHERE id = ? AND user_id = ?', id, userId);
+}> {
+  const row = await get<Row>(
+    db,
+    'SELECT * FROM upload_staging WHERE id = ? AND user_id = ?',
+    id,
+    userId,
+  );
   if (!row || str(row, 'expires_at') < now.toISOString())
     throw new HttpError(404, 'Aperçu expiré. Déposez le fichier à nouveau.');
   return {
@@ -604,31 +758,32 @@ export function readStaging(
   };
 }
 
-export function commitStaging(
+export async function commitStaging(
   db: DB,
   id: string,
   userId: string,
   mapping: ColumnMapping,
   actor: string,
   now: Date,
-): UsageImport {
-  const staging = readStaging(db, id, userId, now);
+): Promise<UsageImport> {
+  const staging = await readStaging(db, id, userId, now);
   assertMapping(staging.headers, mapping);
   const drafts = interpretRows(staging.headers, staging.records, mapping);
   const included = drafts.filter((draft) => draft.include);
   if (included.length === 0) throw new HttpError(400, 'Aucune ligne exploitable.');
-  return transaction(db, () => {
+  return await transaction(db, async () => {
     const importId = newId();
     const iso = now.toISOString();
     let rowCount = 0;
     let duplicates = 0;
     const skipped = drafts.length - included.length;
     const seen = new Set<string>();
-    run(
+    await run(
       db,
-      `INSERT INTO imports (id, filename, mapping_json, row_count, duplicate_count, skipped_count, error_count, created_at)
-       VALUES (?, ?, ?, 0, 0, 0, ?, ?)`,
+      `INSERT INTO imports (id, user_id, filename, mapping_json, row_count, duplicate_count, skipped_count, error_count, created_at)
+       VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?)`,
       importId,
+      userId,
       staging.filename,
       JSON.stringify(mapping),
       staging.errors.length,
@@ -637,21 +792,27 @@ export function commitStaging(
     for (const draft of included) {
       if (
         seen.has(draft.fingerprint) ||
-        get<Row>(db, 'SELECT id FROM usage_rows WHERE fingerprint = ?', draft.fingerprint)
+        (await get<Row>(
+          db,
+          'SELECT id FROM usage_rows WHERE user_id = ? AND fingerprint = ?',
+          userId,
+          draft.fingerprint,
+        ))
       ) {
         duplicates += 1;
         continue;
       }
       seen.add(draft.fingerprint);
-      const botId = matchBotId(db, draft.botKey);
-      run(
+      const botId = await matchBotId(db, userId, draft.botKey);
+      await run(
         db,
         `INSERT INTO usage_rows (
-          id, import_id, fingerprint, occurred_at, day, input_tokens, cache_tokens, output_tokens, total_tokens,
+          id, user_id, import_id, fingerprint, occurred_at, day, input_tokens, cache_tokens, output_tokens, total_tokens,
           cost_raw, cost_value, cost_kind, model, kind, automation_id, reported_bot_key, bot_id, assignment_provenance,
           source, is_demo, raw_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', 0, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', 0, ?, ?)`,
         newId(),
+        userId,
         importId,
         draft.fingerprint,
         draft.occurredAt,
@@ -676,7 +837,7 @@ export function commitStaging(
     }
     if (rowCount === 0)
       throw new HttpError(409, 'Toutes les lignes exploitables sont déjà présentes.');
-    run(
+    await run(
       db,
       'UPDATE imports SET row_count = ?, duplicate_count = ?, skipped_count = ? WHERE id = ?',
       rowCount,
@@ -684,15 +845,18 @@ export function commitStaging(
       skipped,
       importId,
     );
-    run(db, 'DELETE FROM upload_staging WHERE id = ?', id);
-    addAudit(
+    await run(db, 'DELETE FROM upload_staging WHERE id = ?', id);
+    await addAudit(
       db,
+      userId,
       actor,
       'usage.import',
       `${staging.filename} · ${rowCount} ligne(s), ${duplicates} doublon(s).`,
       now,
     );
-    return mapImport(get<Row>(db, 'SELECT * FROM imports WHERE id = ?', importId)!);
+    return mapImport(
+      (await get<Row>(db, 'SELECT * FROM imports WHERE id = ? AND user_id = ?', importId, userId))!,
+    );
   });
 }
 
@@ -704,104 +868,132 @@ export type UsageQuery = {
   bot: string | null;
 };
 
-export function usageSummary(db: DB, query: UsageQuery): UsageSummary {
-  const settings = readSettings(db);
-  const rows = listUsage(db, query, settings.demoMode, 20_000, 0);
-  const signals = eventTokenCount(db, settings.demoMode);
+export async function usageSummary(
+  db: DB,
+  userId: string,
+  query: UsageQuery,
+): Promise<UsageSummary> {
+  const settings = await readSettings(db, userId);
+  const rows = await listUsage(db, userId, query, settings.demoMode, 20_000, 0);
+  const signals = await eventTokenCount(db, userId, settings.demoMode);
   return summarizeUsage(rows, query, signals);
 }
 
-export function listUsage(
+export async function listUsage(
   db: DB,
+  userId: string,
   query: UsageQuery,
   demo: boolean,
   limit: number,
   offset: number,
-): UsageRow[] {
-  const filter = usageWhere(query, demo);
-  return all<Row>(
-    db,
-    `SELECT usage_rows.*, bots.name AS bot_name
+): Promise<UsageRow[]> {
+  const filter = usageWhere(query, demo, userId);
+  return (
+    await all<Row>(
+      db,
+      `SELECT usage_rows.*, bots.name AS bot_name
      FROM usage_rows LEFT JOIN bots ON bots.id = usage_rows.bot_id
      WHERE ${filter.sql}
      ORDER BY COALESCE(usage_rows.occurred_at, usage_rows.created_at) DESC
      LIMIT ? OFFSET ?`,
-    ...filter.params,
-    limit,
-    offset,
+      ...filter.params,
+      limit,
+      offset,
+    )
   ).map(mapUsage);
 }
 
-export function assignUsage(
+export async function assignUsage(
   db: DB,
+  userId: string,
   rowId: string,
   botId: string | null,
   note: string,
   actor: string,
   now: Date,
-): UsageRow {
-  const row = get<Row>(db, 'SELECT * FROM usage_rows WHERE id = ?', rowId);
+): Promise<UsageRow> {
+  const row = await get<Row>(
+    db,
+    'SELECT * FROM usage_rows WHERE id = ? AND user_id = ?',
+    rowId,
+    userId,
+  );
   if (!row) throw new HttpError(404, 'Ligne introuvable.');
   if (flag(row, 'is_demo'))
     throw new HttpError(400, 'Les lignes de démonstration ne s’attribuent pas.');
   let provenance = 'manuel: retrait';
   if (botId) {
-    const bot = getBot(db, botId, now);
+    const bot = await getBot(db, userId, botId, now);
     if (bot.isDemo)
       throw new HttpError(400, 'Une fiche de démonstration ne reçoit pas de données réelles.');
     if (bot.archivedAt) throw new HttpError(400, 'Cette fiche est archivée.');
     provenance = `manuel: ${cleanText(note, 180) || 'attribution manuelle'}`;
   }
-  run(
+  await run(
     db,
-    'UPDATE usage_rows SET bot_id = ?, assignment_provenance = ? WHERE id = ?',
+    'UPDATE usage_rows SET bot_id = ?, assignment_provenance = ? WHERE id = ? AND user_id = ?',
     botId,
     provenance,
     rowId,
+    userId,
   );
-  addAudit(db, actor, 'usage.assign', provenance, now);
+  await addAudit(db, userId, actor, 'usage.assign', provenance, now);
   return mapUsage(
-    get<Row>(
+    (await get<Row>(
       db,
-      `SELECT usage_rows.*, bots.name AS bot_name FROM usage_rows LEFT JOIN bots ON bots.id = usage_rows.bot_id WHERE usage_rows.id = ?`,
+      `SELECT usage_rows.*, bots.name AS bot_name FROM usage_rows LEFT JOIN bots ON bots.id = usage_rows.bot_id WHERE usage_rows.id = ? AND usage_rows.user_id = ?`,
       rowId,
-    )!,
+      userId,
+    ))!,
   );
 }
 
-export function deleteImport(db: DB, id: string, actor: string, now: Date): void {
-  const row = get<Row>(db, 'SELECT * FROM imports WHERE id = ?', id);
+export async function deleteImport(
+  db: DB,
+  userId: string,
+  id: string,
+  actor: string,
+  now: Date,
+): Promise<void> {
+  const row = await get<Row>(db, 'SELECT * FROM imports WHERE id = ? AND user_id = ?', id, userId);
   if (!row) throw new HttpError(404, 'Import introuvable.');
-  run(db, 'DELETE FROM imports WHERE id = ?', id);
-  addAudit(db, actor, 'usage.delete', str(row, 'filename'), now);
+  await run(db, 'DELETE FROM imports WHERE id = ? AND user_id = ?', id, userId);
+  await addAudit(db, userId, actor, 'usage.delete', str(row, 'filename'), now);
 }
 
-export function resetUsage(db: DB, actor: string, now: Date): void {
-  transaction(db, () => {
-    run(db, `DELETE FROM usage_rows WHERE source = 'csv'`);
-    run(db, 'DELETE FROM imports');
-    run(db, 'DELETE FROM upload_staging');
-    addAudit(db, actor, 'usage.reset', 'Imports CSV effacés.', now);
+export async function resetUsage(db: DB, userId: string, actor: string, now: Date): Promise<void> {
+  await transaction(db, async () => {
+    await run(db, `DELETE FROM usage_rows WHERE user_id = ? AND source = 'csv'`, userId);
+    await run(db, 'DELETE FROM imports WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM upload_staging WHERE user_id = ?', userId);
+    await addAudit(db, userId, actor, 'usage.reset', 'Imports CSV effacés.', now);
   });
 }
 
-export function resetWorkshop(db: DB, actor: string, now: Date): void {
-  transaction(db, () => {
-    run(db, 'DELETE FROM bot_history');
-    run(db, 'DELETE FROM events');
-    run(db, 'DELETE FROM usage_rows');
-    run(db, 'DELETE FROM imports');
-    run(db, 'DELETE FROM upload_staging');
-    run(db, 'DELETE FROM bots');
-    run(db, 'DELETE FROM rooms');
-    run(db, 'DELETE FROM teams');
-    run(db, 'DELETE FROM webhook_calls');
-    run(
+export async function resetWorkshop(
+  db: DB,
+  userId: string,
+  actor: string,
+  now: Date,
+): Promise<void> {
+  await transaction(db, async () => {
+    await run(db, 'DELETE FROM bot_history WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM events WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM usage_rows WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM imports WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM upload_staging WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM bots WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM rooms WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM teams WHERE user_id = ?', userId);
+    await run(db, 'DELETE FROM webhook_calls WHERE user_id = ?', userId);
+    await run(
       db,
-      `INSERT INTO settings (key, value) VALUES ('demo_mode', '0') ON CONFLICT(key) DO UPDATE SET value = '0'`,
+      `INSERT INTO settings (user_id, key, value) VALUES (?, 'demo_mode', '0') ON CONFLICT(user_id, key) DO UPDATE SET value = '0'`,
+      userId,
     );
-    addAudit(
+    await addAudit(
       db,
+      userId,
       actor,
       'workshop.reset',
       'Atelier vidé. Le compte et les jetons MCP sont conservés.',
@@ -810,15 +1002,26 @@ export function resetWorkshop(db: DB, actor: string, now: Date): void {
   });
 }
 
-export function listTokens(db: DB): Array<{
-  id: string;
-  label: string;
-  hint: string;
-  createdAt: string;
-  lastUsedAt: string | null;
-  revokedAt: string | null;
-}> {
-  return all<Row>(db, 'SELECT * FROM mcp_tokens ORDER BY created_at DESC').map((row) => ({
+export async function listTokens(
+  db: DB,
+  userId: string,
+): Promise<
+  Array<{
+    id: string;
+    label: string;
+    hint: string;
+    createdAt: string;
+    lastUsedAt: string | null;
+    revokedAt: string | null;
+  }>
+> {
+  return (
+    await all<Row>(
+      db,
+      'SELECT * FROM mcp_tokens WHERE user_id = ? ORDER BY created_at DESC',
+      userId,
+    )
+  ).map((row) => ({
     id: str(row, 'id'),
     label: str(row, 'label'),
     hint: str(row, 'hint'),
@@ -828,47 +1031,69 @@ export function listTokens(db: DB): Array<{
   }));
 }
 
-export function insertToken(
+export async function insertToken(
   db: DB,
+  userId: string,
   label: string,
   hash: string,
   hint: string,
   actor: string,
   now: Date,
-): string {
+): Promise<string> {
   const id = newId();
-  run(
+  await run(
     db,
-    'INSERT INTO mcp_tokens (id, label, token_hash, hint, created_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO mcp_tokens (id, user_id, label, token_hash, hint, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     id,
+    userId,
     required(label, 80, 'Libellé requis.'),
     hash,
     hint,
     now.toISOString(),
   );
-  addAudit(db, actor, 'token.create', `Jeton ${hint}… créé.`, now);
+  await addAudit(db, userId, actor, 'token.create', `Jeton ${hint}… créé.`, now);
   return id;
 }
 
-export function revokeToken(db: DB, id: string, actor: string, now: Date): void {
-  const row = get<Row>(db, 'SELECT * FROM mcp_tokens WHERE id = ?', id);
+export async function revokeToken(
+  db: DB,
+  userId: string,
+  id: string,
+  actor: string,
+  now: Date,
+): Promise<void> {
+  const row = await get<Row>(
+    db,
+    'SELECT * FROM mcp_tokens WHERE id = ? AND user_id = ?',
+    id,
+    userId,
+  );
   if (!row) throw new HttpError(404, 'Jeton introuvable.');
-  run(db, 'UPDATE mcp_tokens SET revoked_at = ? WHERE id = ?', now.toISOString(), id);
-  addAudit(db, actor, 'token.revoke', `Jeton ${str(row, 'hint')}… révoqué.`, now);
+  await run(
+    db,
+    'UPDATE mcp_tokens SET revoked_at = ? WHERE id = ? AND user_id = ?',
+    now.toISOString(),
+    id,
+    userId,
+  );
+  await addAudit(db, userId, actor, 'token.revoke', `Jeton ${str(row, 'hint')}… révoqué.`, now);
 }
 
-export function authenticateToken(db: DB, secret: string): { id: string; label: string } | null {
-  const row = get<Row>(
+export async function authenticateToken(
+  db: DB,
+  secret: string,
+): Promise<{ id: string; label: string; userId: string } | null> {
+  const row = await get<Row>(
     db,
-    'SELECT id, label, revoked_at FROM mcp_tokens WHERE token_hash = ?',
+    'SELECT id, label, user_id, revoked_at FROM mcp_tokens WHERE token_hash = ?',
     sha256(secret),
   );
   if (!row || row.revoked_at) return null;
-  return { id: str(row, 'id'), label: str(row, 'label') };
+  return { id: str(row, 'id'), label: str(row, 'label'), userId: str(row, 'user_id') };
 }
 
-export function touchToken(db: DB, id: string, now: Date): void {
-  run(db, 'UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?', now.toISOString(), id);
+export async function touchToken(db: DB, id: string, now: Date): Promise<void> {
+  await run(db, 'UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?', now.toISOString(), id);
 }
 
 export type SignalInput = {
@@ -882,17 +1107,23 @@ export type SignalInput = {
   tokens: { input?: number; cache?: number; output?: number; total?: number } | null;
 };
 
-export function recordSignal(
+export async function recordSignal(
   db: DB,
+  userId: string,
   input: SignalInput,
   now: Date,
-): { duplicate: boolean; linked: boolean; botId: string | null; message: string } {
+): Promise<{ duplicate: boolean; linked: boolean; botId: string | null; message: string }> {
   const botKey = required(input.botKey, 120, 'Identifiant de bot requis.');
   const source = cleanText(input.source, 80) || 'bot';
   const name = cleanText(input.name, 120) || (input.kind === 'status' ? 'statut' : 'evenement');
   const detail = cleanText(input.detail, 1000);
   const fingerprint = sha256(JSON.stringify({ ...input, botKey, source, name, detail }));
-  const existing = get<Row>(db, 'SELECT id, bot_id FROM events WHERE fingerprint = ?', fingerprint);
+  const existing = await get<Row>(
+    db,
+    'SELECT id, bot_id FROM events WHERE user_id = ? AND fingerprint = ?',
+    userId,
+    fingerprint,
+  );
   if (existing) {
     return {
       duplicate: true,
@@ -901,21 +1132,23 @@ export function recordSignal(
       message: 'Signal déjà enregistré.',
     };
   }
-  const botRow = get<Row>(
+  const botRow = await get<Row>(
     db,
-    `SELECT * FROM bots WHERE archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?))
+    `SELECT * FROM bots WHERE user_id = ? AND archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?))
      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1`,
+    userId,
     botKey,
     botKey,
     botKey,
   );
   const botId = botRow ? str(botRow, 'id') : null;
   const received = now.toISOString();
-  run(
+  await run(
     db,
-    `INSERT INTO events (id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+    `INSERT INTO events (id, user_id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     newId(),
+    userId,
     fingerprint,
     botId,
     botKey,
@@ -932,10 +1165,11 @@ export function recordSignal(
     const last = botRow.last_seen_at == null ? null : str(botRow, 'last_seen_at');
     const newer = !last || input.occurredAt >= last;
     if (input.kind === 'status' && input.status) {
-      run(
+      await run(
         db,
-        'INSERT INTO bot_history (id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO bot_history (id, user_id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
         newId(),
+        userId,
         botId,
         input.status,
         detail || name,
@@ -943,23 +1177,25 @@ export function recordSignal(
         input.occurredAt,
       );
       if (newer) {
-        run(
+        await run(
           db,
-          'UPDATE bots SET status = ?, status_note = ?, last_seen_at = ?, updated_at = ? WHERE id = ?',
+          'UPDATE bots SET status = ?, status_note = ?, last_seen_at = ?, updated_at = ? WHERE id = ? AND user_id = ?',
           input.status,
           detail,
           input.occurredAt,
           received,
           botId,
+          userId,
         );
       }
     } else if (newer) {
-      run(
+      await run(
         db,
-        'UPDATE bots SET last_seen_at = ?, updated_at = ? WHERE id = ?',
+        'UPDATE bots SET last_seen_at = ?, updated_at = ? WHERE id = ? AND user_id = ?',
         input.occurredAt,
         received,
         botId,
+        userId,
       );
     }
   }
@@ -973,27 +1209,37 @@ export function recordSignal(
   };
 }
 
-export function listEvents(db: DB, demo: boolean): Signal[] {
-  return all<Row>(
-    db,
-    'SELECT * FROM events WHERE (? = 1 OR is_demo = 0) ORDER BY occurred_at DESC LIMIT 100',
-    demo ? 1 : 0,
+export async function listEvents(db: DB, userId: string, demo: boolean): Promise<Signal[]> {
+  return (
+    await all<Row>(
+      db,
+      'SELECT * FROM events WHERE user_id = ? AND (? = 1 OR is_demo = 0) ORDER BY occurred_at DESC LIMIT 100',
+      userId,
+      demo ? 1 : 0,
+    )
   ).map(mapSignal);
 }
 
-export function materializeSignal(
+export async function materializeSignal(
   db: DB,
+  userId: string,
   eventId: string,
   name: string,
   actor: string,
   now: Date,
-): Bot {
-  const event = get<Row>(db, 'SELECT * FROM events WHERE id = ? AND is_demo = 0', eventId);
+): Promise<Bot> {
+  const event = await get<Row>(
+    db,
+    'SELECT * FROM events WHERE id = ? AND user_id = ? AND is_demo = 0',
+    eventId,
+    userId,
+  );
   if (!event) throw new HttpError(404, 'Signal introuvable.');
   const key = str(event, 'reported_bot_key');
-  const existing = get<Row>(
+  const existing = await get<Row>(
     db,
-    `SELECT id FROM bots WHERE archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?)) LIMIT 1`,
+    `SELECT id FROM bots WHERE user_id = ? AND archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?)) LIMIT 1`,
+    userId,
     key,
     key,
   );
@@ -1005,11 +1251,12 @@ export function materializeSignal(
       payload.status && BOT_STATUSES.includes(payload.status as BotStatus)
         ? payload.status
         : 'offline';
-    run(
+    await run(
       db,
-      `INSERT INTO bots (id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
-       VALUES (?, ?, ?, 'À préciser', '', NULL, NULL, ?, '', NULL, 0, 'manual', ?, ?)`,
+      `INSERT INTO bots (id, user_id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'À préciser', '', NULL, NULL, ?, '', NULL, 0, 'manual', ?, ?)`,
       botId,
+      userId,
       key,
       required(name, 80, 'Nom de fiche requis.'),
       status,
@@ -1017,48 +1264,58 @@ export function materializeSignal(
       iso,
     );
   }
-  run(
+  await run(
     db,
-    'UPDATE events SET bot_id = ?, linked = 1 WHERE reported_bot_key = ? AND bot_id IS NULL AND is_demo = 0',
+    'UPDATE events SET bot_id = ?, linked = 1 WHERE user_id = ? AND reported_bot_key = ? AND bot_id IS NULL AND is_demo = 0',
     botId,
+    userId,
     key,
   );
-  const newest = get<Row>(
+  const newest = await get<Row>(
     db,
-    `SELECT * FROM events WHERE bot_id = ? AND kind = 'status' ORDER BY occurred_at DESC LIMIT 1`,
+    `SELECT * FROM events WHERE user_id = ? AND bot_id = ? AND kind = 'status' ORDER BY occurred_at DESC LIMIT 1`,
+    userId,
     botId,
   );
   if (newest) {
     const payload = JSON.parse(str(newest, 'payload_json') || '{}') as { status?: string };
     if (payload.status && BOT_STATUSES.includes(payload.status as BotStatus)) {
-      run(
+      await run(
         db,
-        'UPDATE bots SET status = ?, status_note = ?, last_seen_at = ?, updated_at = ? WHERE id = ?',
+        'UPDATE bots SET status = ?, status_note = ?, last_seen_at = ?, updated_at = ? WHERE id = ? AND user_id = ?',
         payload.status,
         str(newest, 'detail'),
         str(newest, 'occurred_at'),
         iso,
         botId,
+        userId,
       );
     }
   }
-  addAudit(db, actor, 'event.materialize', `Fiche reliée à ${key}.`, now);
-  return getBot(db, botId, now);
+  await addAudit(db, userId, actor, 'event.materialize', `Fiche reliée à ${key}.`, now);
+  return await getBot(db, userId, botId, now);
 }
 
-export function recentWebhookCount(db: DB, action: string, now: Date): number {
+export async function recentWebhookCount(
+  db: DB,
+  userId: string,
+  action: string,
+  now: Date,
+): Promise<number> {
   const since = new Date(now.getTime() - 3_600_000).toISOString();
-  const row = get<Row>(
+  const row = await get<Row>(
     db,
-    'SELECT COUNT(*) AS n FROM webhook_calls WHERE action_name = ? AND created_at >= ?',
+    'SELECT COUNT(*) AS n FROM webhook_calls WHERE user_id = ? AND action_name = ? AND created_at >= ?',
+    userId,
     action,
     since,
   );
   return Number(row?.n ?? 0);
 }
 
-export function insertWebhookCall(
+export async function insertWebhookCall(
   db: DB,
+  userId: string,
   input: {
     action: string;
     botId: string | null;
@@ -1067,12 +1324,13 @@ export function insertWebhookCall(
     detail: string;
   },
   now: Date,
-): WebhookCall {
+): Promise<WebhookCall> {
   const id = newId();
-  run(
+  await run(
     db,
-    'INSERT INTO webhook_calls (id, action_name, bot_id, status, http_status, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO webhook_calls (id, user_id, action_name, bot_id, status, http_status, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     id,
+    userId,
     input.action,
     input.botId,
     input.status,
@@ -1080,19 +1338,26 @@ export function insertWebhookCall(
     cleanText(input.detail, 400),
     now.toISOString(),
   );
-  return mapWebhook(get<Row>(db, 'SELECT * FROM webhook_calls WHERE id = ?', id)!);
-}
-
-export function listWebhookCalls(db: DB): WebhookCall[] {
-  return all<Row>(db, 'SELECT * FROM webhook_calls ORDER BY created_at DESC LIMIT 40').map(
-    mapWebhook,
+  return mapWebhook(
+    (await get<Row>(db, 'SELECT * FROM webhook_calls WHERE id = ? AND user_id = ?', id, userId))!,
   );
 }
 
-export function eventTokenCount(db: DB, demo: boolean): number {
-  const rows = all<Row>(
+export async function listWebhookCalls(db: DB, userId: string): Promise<WebhookCall[]> {
+  return (
+    await all<Row>(
+      db,
+      'SELECT * FROM webhook_calls WHERE user_id = ? ORDER BY created_at DESC LIMIT 40',
+      userId,
+    )
+  ).map(mapWebhook);
+}
+
+export async function eventTokenCount(db: DB, userId: string, demo: boolean): Promise<number> {
+  const rows = await all<Row>(
     db,
-    'SELECT payload_json FROM events WHERE (? = 1 OR is_demo = 0)',
+    'SELECT payload_json FROM events WHERE user_id = ? AND (? = 1 OR is_demo = 0)',
+    userId,
     demo ? 1 : 0,
   );
   return rows.filter((row) => {
@@ -1105,107 +1370,127 @@ export function eventTokenCount(db: DB, demo: boolean): number {
   }).length;
 }
 
-function clearDemo(db: DB): void {
-  const ids = all<Row>(db, 'SELECT id FROM bots WHERE is_demo = 1').map((row) => str(row, 'id'));
-  for (const id of ids) run(db, 'DELETE FROM bot_history WHERE bot_id = ?', id);
-  run(db, 'DELETE FROM events WHERE is_demo = 1');
-  run(db, 'DELETE FROM usage_rows WHERE is_demo = 1');
-  run(db, 'DELETE FROM bots WHERE is_demo = 1');
-  run(db, 'DELETE FROM rooms WHERE is_demo = 1');
-  run(db, 'DELETE FROM teams WHERE is_demo = 1');
+async function clearDemo(db: DB, userId: string): Promise<void> {
+  const ids = (
+    await all<Row>(db, 'SELECT id FROM bots WHERE user_id = ? AND is_demo = 1', userId)
+  ).map((row) => str(row, 'id'));
+  for (const id of ids)
+    await run(db, 'DELETE FROM bot_history WHERE bot_id = ? AND user_id = ?', id, userId);
+  await run(db, 'DELETE FROM events WHERE user_id = ? AND is_demo = 1', userId);
+  await run(db, 'DELETE FROM usage_rows WHERE user_id = ? AND is_demo = 1', userId);
+  await run(db, 'DELETE FROM bots WHERE user_id = ? AND is_demo = 1', userId);
+  await run(db, 'DELETE FROM rooms WHERE user_id = ? AND is_demo = 1', userId);
+  await run(db, 'DELETE FROM teams WHERE user_id = ? AND is_demo = 1', userId);
 }
 
-function seedDemo(db: DB, now: Date): void {
+async function seedDemo(db: DB, userId: string, now: Date): Promise<void> {
   const pack = PACKS[0]!;
   const dev = PACKS[1]!;
-  const teamId = 'demo-team-qualite';
-  const otherId = 'demo-team-dev';
-  run(
+  const demoId = (name: string) => `demo:${userId}:${name}`;
+  const teamId = demoId('team-qualite');
+  const otherId = demoId('team-dev');
+  const roomRelecture = demoId('room-relecture');
+  const roomCas = demoId('room-cas');
+  const roomEtabli = demoId('room-etabli');
+  const botBrume = demoId('bot-brume');
+  const botCale = demoId('bot-cale');
+  const botRive = demoId('bot-rive');
+  const botTrame = demoId('bot-trame');
+  await run(
     db,
-    'INSERT INTO teams (id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)',
+    'INSERT INTO teams (id, user_id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
     teamId,
+    userId,
     pack.name,
     pack.mission,
     pack.accent,
     'demo',
     now.toISOString(),
   );
-  run(
+  await run(
     db,
-    'INSERT INTO teams (id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)',
+    'INSERT INTO teams (id, user_id, name, mission, accent, origin, is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
     otherId,
+    userId,
     dev.name,
     dev.mission,
     dev.accent,
     'demo',
     now.toISOString(),
   );
-  const rooms = [
-    ['demo-room-relecture', teamId, 'Table de relecture', 'revue', 0.15, 0.2],
-    ['demo-room-cas', teamId, 'Paillasse des cas', 'labo', 2.35, 0.15],
-    ['demo-room-etabli', otherId, 'Établi', 'atelier', 0.2, 2.25],
-  ] as const;
+  const rooms: Array<[string, string, string, string, number, number]> = [
+    [roomRelecture, teamId, 'Table de relecture', 'revue', 0.15, 0.2],
+    [roomCas, teamId, 'Paillasse des cas', 'labo', 2.35, 0.15],
+    [roomEtabli, otherId, 'Établi', 'atelier', 0.2, 2.25],
+  ];
   for (const room of rooms) {
-    run(
+    await run(
       db,
-      'INSERT INTO rooms (id, team_id, name, kind, grid_x, grid_y, is_demo) VALUES (?, ?, ?, ?, ?, ?, 1)',
-      ...room,
+      'INSERT INTO rooms (id, user_id, team_id, name, kind, grid_x, grid_y, is_demo) VALUES (?, ?, ?, ?, ?, ?, ?, 1)',
+      room[0],
+      userId,
+      room[1],
+      room[2],
+      room[3],
+      room[4],
+      room[5],
     );
   }
   const stale = new Date(now.getTime() - 3 * 3_600_000).toISOString();
   const fresh = new Date(now.getTime() - 4 * 60_000).toISOString();
   const bots = [
     [
-      'demo-bot-brume',
+      botBrume,
       'demo-brume',
       'Brume',
       'Relecture',
       pack.bots[0]!.brief,
       teamId,
-      'demo-room-relecture',
+      roomRelecture,
       'working',
       stale,
     ],
     [
-      'demo-bot-cale',
+      botCale,
       'demo-cale',
       'Cale',
       'Cas limites',
       pack.bots[1]!.brief,
       teamId,
-      'demo-room-cas',
+      roomCas,
       'idle',
       fresh,
     ],
     [
-      'demo-bot-rive',
+      botRive,
       'demo-rive',
       'Rive',
       'Compte-rendu',
       pack.bots[2]!.brief,
       teamId,
-      'demo-room-relecture',
+      roomRelecture,
       'away',
       fresh,
     ],
     [
-      'demo-bot-trame',
+      botTrame,
       'demo-trame',
       'Trame',
       'Découpage',
       dev.bots[0]!.brief,
       otherId,
-      'demo-room-etabli',
+      roomEtabli,
       'idle',
       fresh,
     ],
   ] as const;
   for (const bot of bots) {
-    run(
+    await run(
       db,
-      `INSERT INTO bots (id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Fiche fictive', ?, 1, 'demo', ?, ?)`,
+      `INSERT INTO bots (id, user_id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Fiche fictive', ?, 1, 'demo', ?, ?)`,
       bot[0],
+      userId,
       bot[1],
       bot[2],
       bot[3],
@@ -1219,29 +1504,30 @@ function seedDemo(db: DB, now: Date): void {
     );
   }
   const samples: UsageDraft[] = [
-    demoDraft(now, 1, 9, 'demo-a', 1200, 1.25, 'numeric', 'demo-bot-brume', 'demo-brume'),
-    demoDraft(now, 2, 9, 'demo-a', 800, null, 'included', 'demo-bot-cale', 'demo-cale'),
+    demoDraft(now, 1, 9, 'demo-a', 1200, 1.25, 'numeric', botBrume, 'demo-brume'),
+    demoDraft(now, 2, 9, 'demo-a', 800, null, 'included', botCale, 'demo-cale'),
     demoDraft(now, 3, 11, 'demo-b', 400, null, 'unknown', null, ''),
-    demoDraft(now, 4, 15, 'demo-b', 50, 0, 'numeric', 'demo-bot-trame', 'demo-trame'),
+    demoDraft(now, 4, 15, 'demo-b', 50, 0, 'numeric', botTrame, 'demo-trame'),
   ];
   samples[1]!.costRaw = 'Included';
   samples[2]!.costRaw = '-';
   samples.push({
-    ...demoDraft(now, 1, 18, 'demo-a', 0, 2.5, 'numeric', 'demo-bot-rive', 'demo-rive'),
+    ...demoDraft(now, 1, 18, 'demo-a', 0, 2.5, 'numeric', botRive, 'demo-rive'),
     totalTokens: null,
     inputTokens: 10,
     messages: ['Total absent, volontairement.'],
   });
   for (const draft of samples) {
-    run(
+    await run(
       db,
       `INSERT INTO usage_rows (
-        id, import_id, fingerprint, occurred_at, day, input_tokens, cache_tokens, output_tokens, total_tokens,
+        id, user_id, import_id, fingerprint, occurred_at, day, input_tokens, cache_tokens, output_tokens, total_tokens,
         cost_raw, cost_value, cost_kind, model, kind, automation_id, reported_bot_key, bot_id, assignment_provenance,
         source, is_demo, raw_json, created_at
-      ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'demonstration', '', ?, ?, ?, 'demo', 1, '{}', ?)`,
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'demonstration', '', ?, ?, ?, 'demo', 1, '{}', ?)`,
       newId(),
-      `demo:${draft.fingerprint}`,
+      userId,
+      `demo:${userId}:${draft.fingerprint}`,
       draft.occurredAt,
       draft.day,
       draft.inputTokens,
@@ -1253,29 +1539,39 @@ function seedDemo(db: DB, now: Date): void {
       draft.costKind,
       draft.model,
       draft.botKey,
-      draft.botKey
-        ? draft.botKey.replace('demo-', 'demo-bot-').replace('demo-bot-bot-', 'demo-bot-')
-        : null,
+      draft.botKey === 'demo-brume'
+        ? botBrume
+        : draft.botKey === 'demo-cale'
+          ? botCale
+          : draft.botKey === 'demo-rive'
+            ? botRive
+            : draft.botKey === 'demo-trame'
+              ? botTrame
+              : null,
       draft.botKey ? 'demo:fiche fictive' : null,
       now.toISOString(),
     );
   }
-  run(
+  await run(
     db,
-    `INSERT INTO events (id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
-     VALUES (?, ?, 'demo-bot-brume', 'demo-brume', 'demonstration', 'status', 'statut', 'Fiche fictive au travail.', ?, ?, ?, 1, 1)`,
+    `INSERT INTO events (id, user_id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
+     VALUES (?, ?, ?, ?, 'demo-brume', 'demonstration', 'status', 'statut', 'Fiche fictive au travail.', ?, ?, ?, 1, 1)`,
     newId(),
-    `demo:event:brume:${stale}`,
+    userId,
+    `demo:${userId}:event:brume:${stale}`,
+    botBrume,
     JSON.stringify({ status: 'working', tokens: null }),
     stale,
     now.toISOString(),
   );
-  run(
+  await run(
     db,
-    `INSERT INTO events (id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
-     VALUES (?, ?, 'demo-bot-cale', 'demo-cale', 'demonstration', 'event', 'note', 'Jetons déclarés pour l’exemple, non exhaustifs.', ?, ?, ?, 1, 1)`,
+    `INSERT INTO events (id, user_id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
+     VALUES (?, ?, ?, ?, 'demo-cale', 'demonstration', 'event', 'note', 'Jetons déclarés pour l’exemple, non exhaustifs.', ?, ?, ?, 1, 1)`,
     newId(),
-    `demo:event:cale:${fresh}`,
+    userId,
+    `demo:${userId}:event:cale:${fresh}`,
+    botCale,
     JSON.stringify({ tokens: { total: 12 } }),
     fresh,
     now.toISOString(),
@@ -1322,9 +1618,10 @@ function demoDraft(
 function usageWhere(
   query: UsageQuery,
   demo: boolean,
+  userId: string,
 ): { sql: string; params: Array<string | number | null> } {
-  const clauses = ['(? = 1 OR usage_rows.is_demo = 0)'];
-  const params: Array<string | number | null> = [demo ? 1 : 0];
+  const clauses = ['usage_rows.user_id = ?', '(? = 1 OR usage_rows.is_demo = 0)'];
+  const params: Array<string | number | null> = [userId, demo ? 1 : 0];
   if (query.from) {
     clauses.push('usage_rows.day IS NOT NULL AND usage_rows.day >= ?');
     params.push(query.from);
@@ -1349,37 +1646,51 @@ function usageWhere(
   return { sql: clauses.join(' AND '), params };
 }
 
-function matchBotId(db: DB, key: string): string | null {
+async function matchBotId(db: DB, userId: string, key: string): Promise<string | null> {
   if (!key) return null;
-  const row = get<Row>(
+  const row = await get<Row>(
     db,
-    `SELECT id FROM bots WHERE archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?)) LIMIT 1`,
+    `SELECT id FROM bots WHERE user_id = ? AND archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?)) LIMIT 1`,
+    userId,
     key,
     key,
   );
   return row ? str(row, 'id') : null;
 }
 
-function nextSlot(db: DB): [number, number] {
-  const count = Number(get<Row>(db, 'SELECT COUNT(*) AS n FROM rooms')?.n ?? 0);
+async function nextSlot(db: DB, userId: string): Promise<[number, number]> {
+  const count = Number(
+    (await get<Row>(db, 'SELECT COUNT(*) AS n FROM rooms WHERE user_id = ?', userId))?.n ?? 0,
+  );
   const base = ROOM_SLOTS[count % ROOM_SLOTS.length] ?? [0, 0];
   const turn = Math.floor(count / ROOM_SLOTS.length);
   return [base[0] + turn * 0.12, base[1] + turn * 0.12];
 }
 
-function mustTeam(db: DB, id: string): Team {
-  const row = get<Row>(db, 'SELECT * FROM teams WHERE id = ?', id);
+async function mustTeam(db: DB, userId: string, id: string): Promise<Team> {
+  const row = await get<Row>(db, 'SELECT * FROM teams WHERE id = ? AND user_id = ?', id, userId);
   if (!row) throw new HttpError(404, 'Équipe introuvable.');
   return mapTeam(row);
 }
 
-function assertLinks(db: DB, teamId: string | null, roomId: string | null, demo: boolean): void {
+async function assertLinks(
+  db: DB,
+  userId: string,
+  teamId: string | null,
+  roomId: string | null,
+  demo: boolean,
+): Promise<void> {
   if (teamId) {
-    const team = mustTeam(db, teamId);
+    const team = await mustTeam(db, userId, teamId);
     if (team.isDemo !== demo) throw new HttpError(400, 'Équipe incompatible.');
   }
   if (roomId) {
-    const row = get<Row>(db, 'SELECT * FROM rooms WHERE id = ?', roomId);
+    const row = await get<Row>(
+      db,
+      'SELECT * FROM rooms WHERE id = ? AND user_id = ?',
+      roomId,
+      userId,
+    );
     if (!row) throw new HttpError(404, 'Salle introuvable.');
     if (flag(row, 'is_demo') !== demo) throw new HttpError(400, 'Salle incompatible.');
     const roomTeam = row.team_id == null ? null : str(row, 'team_id');
@@ -1388,11 +1699,17 @@ function assertLinks(db: DB, teamId: string | null, roomId: string | null, demo:
   }
 }
 
-function assertExternalKey(db: DB, key: string, exceptId: string | null): void {
+async function assertExternalKey(
+  db: DB,
+  userId: string,
+  key: string,
+  exceptId: string | null,
+): Promise<void> {
   if (!key) return;
-  const row = get<Row>(
+  const row = await get<Row>(
     db,
-    `SELECT id FROM bots WHERE external_key = ? AND archived_at IS NULL AND is_demo = 0 AND (? IS NULL OR id <> ?)`,
+    `SELECT id FROM bots WHERE user_id = ? AND external_key = ? AND archived_at IS NULL AND is_demo = 0 AND (? IS NULL OR id <> ?)`,
+    userId,
     key,
     exceptId,
     exceptId,
@@ -1435,6 +1752,6 @@ export function assertDay(value: string | null): string | null {
   return value;
 }
 
-export function exportRows(db: DB, query: UsageQuery): UsageRow[] {
-  return listUsage(db, query, readSettings(db).demoMode, 20_000, 0);
+export async function exportRows(db: DB, userId: string, query: UsageQuery): Promise<UsageRow[]> {
+  return await listUsage(db, userId, query, (await readSettings(db, userId)).demoMode, 20_000, 0);
 }

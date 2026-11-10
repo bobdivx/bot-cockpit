@@ -5,7 +5,7 @@ import { authHeaders, jsonBody, ownerCookie, testApp } from './helpers.js';
 
 describe('ingestion MCP', () => {
   it('refuse l’URL et un jeton absent, puis persiste un statut ancien', async () => {
-    const { app, close } = testApp();
+    const { app, close } = await testApp();
     const cookie = await ownerCookie(app);
     const created = await jsonBody<{ id: string; token: string }>(
       await app.request('/api/tokens', {

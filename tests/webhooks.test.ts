@@ -46,7 +46,7 @@ describe('demandes allowlist', () => {
     await new Promise<void>((resolve) => hit.listen(0, '127.0.0.1', () => resolve()));
     const address = hit.address();
     if (!address || typeof address === 'string') throw new Error('port');
-    const { app, close } = testApp({
+    const { app, close } = await testApp({
       allowPrivateWebhooks: true,
       webhookSecret: 'secret-serveur',
       webhooks: [{ name: 'demander_point', url: `http://127.0.0.1:${address.port}/hook` }],
@@ -81,7 +81,7 @@ describe('demandes allowlist', () => {
   });
 
   it('bloque encore le metadata même si le réseau privé est ouvert', async () => {
-    const { app, close } = testApp({
+    const { app, close } = await testApp({
       allowPrivateWebhooks: true,
       webhooks: [{ name: 'demander_point', url: 'http://169.254.169.254/latest' }],
     });

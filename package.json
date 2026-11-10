@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.6",
+    "@libsql/client": "^0.15.15",
     "@modelcontextprotocol/server": "^2.4.0",
     "hono": "^4.13.17",
     "preact": "^11.2.0",

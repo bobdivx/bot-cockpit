@@ -18,7 +18,7 @@ npm run dev
 - Interface : http://127.0.0.1:8742
 - API : http://127.0.0.1:8741
 
-La première visite crée le propriétaire (mot de passe d’au moins 12 caractères). En développement, cette création est ouverte sur la machine locale. La base est `data/cockpit.sqlite`.
+La première visite crée un espace (adresse électronique et mot de passe d’au moins 12 caractères). Chaque compte a son propre atelier, isolé des autres. En développement, la création est ouverte sur la machine locale. Sans Turso, la base locale est `data/cockpit.sqlite`.
 
 ```bash
 npm test
@@ -40,26 +40,26 @@ docker compose up --build
 ```
 
 - Santé : `GET /api/health`
-- Volume : `cockpit-data` monté sur `/data`
-- Fichier : `BOT_COCKPIT_DATA=/data/cockpit.sqlite`
-- Le schéma est créé au démarrage (`schema_migrations`). Pas de commande de migration séparée.
+- Volume : `cockpit-data` monté sur `/data` (SQLite local) ou Turso via `TURSO_DATABASE_URL`
+- Fichier local : `BOT_COCKPIT_DATA=/data/cockpit.sqlite`
+- Le schéma est créé au démarrage (`schema_migrations`, version 2, isolation par `user_id`). Pas de commande de migration séparée.
 - `BOT_COCKPIT_ALLOW_OPEN_SETUP=0` par défaut. Hors boucle locale, le premier propriétaire exige `BOT_COCKPIT_SETUP_TOKEN`.
 - Les exemples de secrets sont dans `.env.example`. Ne pas y mettre de vrais jetons.
 
 Le fichier `deploy/devforge.json` ne fait que décrire ce contrat Compose. Il ne déclenche aucun déploiement.
 
 
-## Vercel (démo, stockage temporaire)
+## Vercel (Turso)
 
-Prérequis : compte Hobby Vercel, Node 22.x.
+Prérequis : compte Hobby Vercel, Node 22.x, base Turso `bot-cockpit`.
 
-1. Importez le dépôt ou déployez depuis la CLI.
-2. Variables d’environnement recommandées :
-   - `BOT_COCKPIT_SETUP_TOKEN` (secret long, obligatoire pour créer le premier propriétaire)
+1. Importez le dépôt ou déployez depuis la CLI (preview d’abord).
+2. Variables d’environnement :
+   - `TURSO_DATABASE_URL` et `TURSO_AUTH_TOKEN` (obligatoires sur Vercel)
    - `BOT_COCKPIT_COOKIE_SECURE=1`
-   - `BOT_COCKPIT_ALLOW_OPEN_SETUP=0`
-3. L’interface affiche clairement que le stockage est temporaire.
-4. Pour une installation durable, préférez Docker Compose (volume `/data`) ou DevForge.
+   - `BOT_COCKPIT_ALLOW_SIGNUP=1` pour que chacun puisse créer son espace (mettre `0` pour fermer les inscriptions)
+   - `BOT_COCKPIT_SETUP_TOKEN` reste disponible pour l’ancien flux « premier propriétaire » si les inscriptions sont fermées
+3. Les données sont persistantes dans Turso. Le stockage éphémère `/tmp` n’est plus utilisé.
 
 ## Ce que l’atelier fait
 
