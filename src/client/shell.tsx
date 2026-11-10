@@ -6,6 +6,7 @@ import { Links } from './links';
 import { ListView } from './list';
 import { Office } from './office';
 import { Settings } from './settings';
+import { Brand } from './ui';
 import { Usage } from './usage';
 
 const NAV = [
@@ -72,21 +73,30 @@ export function Shell({
   const activeTeams = data?.teams.filter((team) => !team.archivedAt).length ?? 0;
   const activeBots = data?.bots.filter((bot) => !bot.archivedAt).length ?? 0;
 
-  return (
-    <div class="app">
-      <header class="top-hud">
-        <div class="brand">
-          <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
-            <rect width="32" height="32" rx="10" fill="#1c2430" />
-            <circle cx="12" cy="14" r="4" fill="#8eb7ff" />
-            <circle cx="21" cy="13" r="3" fill="#ffb067" />
-            <circle cx="18" cy="20" r="3.5" fill="#c4b2ff" />
-          </svg>
-          <div>
-            <strong>Bot Cockpit</strong>
-            <small>{data?.settings.demoMode ? 'Démonstration' : 'Mode réel'}</small>
-          </div>
+  const pills = (ephemeralStorage || data?.settings.demoMode) && (
+    <div class="pill-stack">
+      {ephemeralStorage && (
+        <div class="demo-pill ephemeral-pill" role="status">
+          <strong>Stockage temporaire (Vercel)</strong>
+          <span>
+            SQLite dans /tmp : les données peuvent disparaître à chaque redémarrage à froid. Docker
+            / DevForge reste l’installation persistante.
+          </span>
         </div>
+      )}
+      {data?.settings.demoMode && (
+        <div class="demo-pill" role="status">
+          <strong>Données de démonstration</strong>
+          <span>Fiches et lignes fictives. Elles ne décrivent pas un compte.</span>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div class={`app route-${route}`}>
+      <header class="top-hud">
+        <Brand subtitle={data?.settings.demoMode ? 'Démonstration' : 'Mode réel'} />
         <nav class="nav-pills" aria-label="Sections">
           {NAV.map(([id, label]) => (
             <button
@@ -108,7 +118,9 @@ export function Shell({
           <span>{data?.signals.length ?? 0} événements</span>
         </div>
         <div class="user-pill">
-          <span>{email}</span>
+          <span class="user-email" title={email}>
+            {email}
+          </span>
           <button
             class="btn small"
             type="button"
@@ -118,22 +130,9 @@ export function Shell({
           </button>
         </div>
       </header>
-      {ephemeralStorage && (
-        <div class="demo-pill ephemeral-pill" role="status">
-          <strong>Stockage temporaire (Vercel)</strong>
-          <span>
-            SQLite dans /tmp : les données peuvent disparaître à chaque redémarrage à froid. Docker
-            / DevForge reste l’installation persistante.
-          </span>
-        </div>
-      )}
-      {data?.settings.demoMode && (
-        <div class="demo-pill" role="status">
-          <strong>Données de démonstration</strong>
-          <span>Fiches et lignes fictives. Elles ne décrivent pas un compte.</span>
-        </div>
-      )}
+      {route === 'bureau' && pills}
       <main class={route === 'bureau' ? 'stage' : 'page'}>
+        {route !== 'bureau' && pills}
         {error && <div class="error">{error}</div>}
         {!data && !error && <p class="meta">Ouverture de l’atelier…</p>}
         {data && route === 'bureau' && (

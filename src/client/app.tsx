@@ -1,7 +1,8 @@
+import type { ComponentChildren } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, api } from './api';
 import { Shell } from './shell';
-import { Field } from './ui';
+import { Brand, Field } from './ui';
 
 type Boot = {
   needsSetup: boolean;
@@ -44,22 +45,24 @@ export function App() {
   if (loading) {
     return (
       <div class="loading-screen">
-        <p class="display">Ouverture de l’atelier…</p>
+        <Brand subtitle="Ouverture de l’atelier…" />
       </div>
     );
   }
   if (!boot) {
     return (
-      <div class="auth-screen">
-        <section class="auth-card">
-          <p class="kicker">Bot Cockpit</p>
-          <h1>Atelier indisponible</h1>
+      <AuthLayout>
+        <section class="panel auth-card">
+          <div class="auth-head">
+            <p class="kicker">Connexion</p>
+            <h2>Atelier indisponible</h2>
+          </div>
           <p class="error">{error || 'Réessayez dans un instant.'}</p>
-          <button class="btn" type="button" onClick={() => void refresh()}>
+          <button class="btn primary" type="button" onClick={() => void refresh()}>
             Réessayer
           </button>
         </section>
-      </div>
+      </AuthLayout>
     );
   }
   if (email)
@@ -81,9 +84,9 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
   const [setupToken, setToken] = useState('');
   const [error, setError] = useState('');
   return (
-    <div class="auth-screen">
+    <AuthLayout>
       <form
-        class="auth-card stack"
+        class="panel auth-card"
         onSubmit={(event) => {
           event.preventDefault();
           setError('');
@@ -97,12 +100,14 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
             );
         }}
       >
-        <p class="kicker">Bot Cockpit</p>
-        <h1>Premier espace</h1>
-        <p class="lede">
-          L’atelier démarre vide. Chaque compte a son propre espace, isolé des autres. Aucune fiche,
-          aucun usage et aucune économie ne sont inventés.
-        </p>
+        <div class="auth-head">
+          <p class="kicker">Configuration</p>
+          <h2>Premier espace</h2>
+          <p class="meta">
+            L’atelier démarre vide. Chaque compte a son propre espace, isolé des autres. Aucune
+            fiche, aucun usage et aucune économie ne sont inventés.
+          </p>
+        </div>
         {boot.ephemeralStorage && (
           <p class="note" role="status">
             Stockage temporaire : les données peuvent disparaître au prochain redémarrage à froid.
@@ -118,6 +123,7 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
           <input
             type="email"
             value={email}
+            autoComplete="email"
             onInput={(event) => setEmail(event.currentTarget.value)}
             required
           />
@@ -126,6 +132,7 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
           <input
             type="password"
             value={password}
+            autoComplete="new-password"
             onInput={(event) => setPassword(event.currentTarget.value)}
             required
           />
@@ -144,7 +151,7 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
           Créer le propriétaire
         </button>
       </form>
-    </div>
+    </AuthLayout>
   );
 }
 
@@ -153,14 +160,20 @@ function Login({ allowSignup, onDone }: { allowSignup: boolean; onDone: (email: 
   const [password, setPassword] = useState('');
   const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
   const signup = mode === 'signup';
+  const switchTo = (next: 'login' | 'signup') => {
+    setError('');
+    setMode(next);
+  };
   return (
-    <div class="auth-screen">
+    <AuthLayout>
       <form
-        class="auth-card stack"
+        class="panel auth-card"
         onSubmit={(event) => {
           event.preventDefault();
           setError('');
+          setBusy(true);
           void api<{ email: string }>(signup ? '/api/signup' : '/api/login', {
             method: 'POST',
             body: JSON.stringify({ email, password }),
@@ -174,21 +187,53 @@ function Login({ allowSignup, onDone }: { allowSignup: boolean; onDone: (email: 
                     ? 'Inscription impossible.'
                     : 'Connexion impossible.',
               ),
-            );
+            )
+            .finally(() => setBusy(false));
         }}
       >
-        <p class="kicker">Bot Cockpit</p>
-        <h1>{signup ? 'Créer votre espace' : 'Reprendre l’atelier'}</h1>
-        <p class="lede">
-          {signup
-            ? 'Chaque adresse ouvre un espace isolé. Aucun compte externe n’est interrogé.'
-            : 'Session de votre espace. Aucun compte externe n’est interrogé.'}
-        </p>
-        {error && <p class="error">{error}</p>}
+        {allowSignup && (
+          <div class="nav-pills auth-tabs" role="tablist" aria-label="Accès">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!signup}
+              aria-current={!signup ? 'page' : undefined}
+              onClick={() => switchTo('login')}
+            >
+              Connexion
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={signup}
+              aria-current={signup ? 'page' : undefined}
+              onClick={() => switchTo('signup')}
+            >
+              Créer un compte
+            </button>
+          </div>
+        )}
+        <div class="auth-head">
+          <p class="kicker">{signup ? 'Nouvel espace' : 'Connexion'}</p>
+          <h2>{signup ? 'Créer votre espace' : 'Reprendre l’atelier'}</h2>
+          <p class="meta">
+            {signup
+              ? 'Chaque adresse ouvre un espace isolé. Aucun compte externe n’est interrogé.'
+              : 'Session de votre espace. Aucun compte externe n’est interrogé.'}
+          </p>
+        </div>
+        {error && (
+          <p class="error" role="alert">
+            {error}
+          </p>
+        )}
         <Field label="Adresse électronique">
           <input
             type="email"
             value={email}
+            autoComplete="email"
+            inputMode="email"
+            placeholder="vous@exemple.fr"
             onInput={(event) => setEmail(event.currentTarget.value)}
             required
           />
@@ -197,27 +242,42 @@ function Login({ allowSignup, onDone }: { allowSignup: boolean; onDone: (email: 
           <input
             type="password"
             value={password}
+            autoComplete={signup ? 'new-password' : 'current-password'}
             onInput={(event) => setPassword(event.currentTarget.value)}
             required
             minLength={signup ? 12 : undefined}
           />
         </Field>
-        <button class="btn primary" type="submit">
-          {signup ? 'Créer l’espace' : 'Entrer'}
+        <button class="btn primary" type="submit" disabled={busy}>
+          {busy ? 'Un instant…' : signup ? 'Créer l’espace' : 'Entrer'}
         </button>
-        {allowSignup && (
-          <button
-            class="btn"
-            type="button"
-            onClick={() => {
-              setError('');
-              setMode(signup ? 'login' : 'signup');
-            }}
-          >
-            {signup ? 'J’ai déjà un espace' : 'Créer un nouvel espace'}
-          </button>
-        )}
       </form>
+    </AuthLayout>
+  );
+}
+
+function AuthLayout({ children }: { children: ComponentChildren }) {
+  return (
+    <div class="auth-screen">
+      <header class="auth-top">
+        <Brand subtitle="Atelier de fiches" />
+      </header>
+      <main class="auth-main">
+        <section class="auth-intro" aria-hidden="true">
+          <p class="kicker">Bot Cockpit</p>
+          <h1>Vos bots, leurs salles, leur usage réel.</h1>
+          <p class="meta">
+            Un bureau partagé pour suivre vos fiches, importer vos CSV d’usage et recevoir des
+            signalements volontaires. Rien n’est inventé.
+          </p>
+          <div class="chips">
+            <span class="badge tone-pine">Espace isolé par compte</span>
+            <span class="badge">Imports CSV</span>
+            <span class="badge">Signalements MCP</span>
+          </div>
+        </section>
+        {children}
+      </main>
     </div>
   );
 }
