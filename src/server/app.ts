@@ -52,6 +52,7 @@ import {
   createRoom,
   createTeam,
   createUser,
+  declaredTokens,
   deleteImport,
   deleteSession,
   deleteUser,
@@ -241,7 +242,7 @@ export function createApp(options: AppOptions) {
           );
           await addAudit(options.db, ownerId, `mcp:${tokenId}`, 'mcp.event', result.message, now());
           publish(ownerId, 'event.created');
-          if (result.linked) publish(ownerId, 'bot.updated');
+          publish(ownerId, 'bot.updated');
           return { content: [{ type: 'text', text: result.message }] };
         },
       );
@@ -393,7 +394,7 @@ export function createApp(options: AppOptions) {
     );
     publish(ownerId, 'event.created');
     publish(ownerId, 'connection.used');
-    if (args.status || result.linked) publish(ownerId, 'bot.updated');
+    publish(ownerId, 'bot.updated');
     return c.json({ ok: true, ...result }, result.duplicate ? 200 : 201);
   });
 
@@ -982,8 +983,19 @@ export function createApp(options: AppOptions) {
 
   app.get('/api/events', async (c) => {
     const user = requireUser(c);
+    const limit = Number(c.req.query('limit') || 100);
     return c.json(
-      await listEvents(options.db, user.id, (await readSettings(options.db, user.id)).demoMode),
+      await listEvents(options.db, user.id, (await readSettings(options.db, user.id)).demoMode, {
+        botId: c.req.query('bot') || null,
+        limit: Number.isFinite(limit) ? limit : 100,
+      }),
+    );
+  });
+
+  app.get('/api/usage/declared', async (c) => {
+    const user = requireUser(c);
+    return c.json(
+      await declaredTokens(options.db, user.id, (await readSettings(options.db, user.id)).demoMode),
     );
   });
 

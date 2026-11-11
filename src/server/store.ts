@@ -1112,7 +1112,13 @@ export async function recordSignal(
   userId: string,
   input: SignalInput,
   now: Date,
-): Promise<{ duplicate: boolean; linked: boolean; botId: string | null; message: string }> {
+): Promise<{
+  duplicate: boolean;
+  linked: boolean;
+  created?: boolean;
+  botId: string | null;
+  message: string;
+}> {
   const botKey = required(input.botKey, 120, 'Identifiant de bot requis.');
   const source = cleanText(input.source, 80) || 'bot';
   const name = cleanText(input.name, 120) || (input.kind === 'status' ? 'statut' : 'evenement');
@@ -1132,7 +1138,7 @@ export async function recordSignal(
       message: 'Signal déjà enregistré.',
     };
   }
-  const botRow = await get<Row>(
+  let botRow = await get<Row>(
     db,
     `SELECT * FROM bots WHERE user_id = ? AND archived_at IS NULL AND is_demo = 0 AND (id = ? OR (external_key <> '' AND external_key = ?))
      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1`,
@@ -1141,6 +1147,37 @@ export async function recordSignal(
     botKey,
     botKey,
   );
+  let created: string | null = null;
+  if (!botRow) {
+    // Unknown bot_id: create its fiche so the signal is never hidden (origin 'auto').
+    created = humanizeBotKey(botKey);
+    const iso = now.toISOString();
+    await run(
+      db,
+      `INSERT INTO bots (id, user_id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, '', '', NULL, NULL, 'offline', '', NULL, 0, 'auto', ?, ?)`,
+      newId(),
+      userId,
+      botKey,
+      created,
+      iso,
+      iso,
+    );
+    await addAudit(
+      db,
+      userId,
+      'bot',
+      'bot.auto',
+      `Fiche « ${created} » créée pour ${botKey}.`,
+      now,
+    );
+    botRow = await get<Row>(
+      db,
+      `SELECT * FROM bots WHERE user_id = ? AND archived_at IS NULL AND is_demo = 0 AND external_key = ? LIMIT 1`,
+      userId,
+      botKey,
+    );
+  }
   const botId = botRow ? str(botRow, 'id') : null;
   const received = now.toISOString();
   await run(
@@ -1203,19 +1240,112 @@ export async function recordSignal(
     duplicate: false,
     linked: Boolean(botId),
     botId,
-    message: botId
-      ? 'Signal enregistré et relié à une fiche.'
-      : 'Signal enregistré, sans fiche correspondante.',
+    created: created !== null,
+    message: created
+      ? `Signal enregistré. Fiche « ${created} » créée automatiquement.`
+      : botId
+        ? 'Signal enregistré et relié à une fiche.'
+        : 'Signal enregistré, sans fiche correspondante.',
   };
 }
 
-export async function listEvents(db: DB, userId: string, demo: boolean): Promise<Signal[]> {
+type DeclaredTokens = { input?: number; cache?: number; output?: number; total?: number };
+
+function parseDeclared(raw: string): DeclaredTokens | null {
+  try {
+    const parsed = JSON.parse(raw || '{}') as { tokens?: DeclaredTokens | null };
+    return parsed.tokens && typeof parsed.tokens === 'object' ? parsed.tokens : null;
+  } catch {
+    return null;
+  }
+}
+
+/** grok-bot → « Grok Bot » ; keeps the key readable when it has no separators. */
+export function humanizeBotKey(key: string): string {
+  const words = key
+    .trim()
+    .split(/[-_.\s/:]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toLocaleUpperCase('fr-FR') + word.slice(1));
+  return (words.join(' ') || key).slice(0, 80);
+}
+
+export async function declaredTokens(
+  db: DB,
+  userId: string,
+  demo: boolean,
+): Promise<{
+  signals: number;
+  total: number;
+  byBot: Array<{ botId: string | null; botKey: string; signals: number; total: number }>;
+  byDay: Array<{ day: string; total: number }>;
+}> {
+  const rows = await all<Row>(
+    db,
+    `SELECT bot_id, reported_bot_key, occurred_at, payload_json FROM events
+     WHERE user_id = ? AND (? = 1 OR is_demo = 0) AND payload_json LIKE '%"tokens":{%'`,
+    userId,
+    demo ? 1 : 0,
+  );
+  const byBot = new Map<
+    string,
+    { botId: string | null; botKey: string; signals: number; total: number }
+  >();
+  const byDay = new Map<string, number>();
+  let total = 0;
+  let signals = 0;
+  const parisDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Paris' });
+  for (const row of rows) {
+    const tokens = parseDeclared(str(row, 'payload_json'));
+    if (!tokens) continue;
+    const value =
+      typeof tokens.total === 'number'
+        ? tokens.total
+        : (tokens.input ?? 0) + (tokens.cache ?? 0) + (tokens.output ?? 0);
+    signals += 1;
+    total += value;
+    const key = str(row, 'reported_bot_key');
+    const entry = byBot.get(key) ?? {
+      botId: row.bot_id == null ? null : str(row, 'bot_id'),
+      botKey: key,
+      signals: 0,
+      total: 0,
+    };
+    entry.signals += 1;
+    entry.total += value;
+    byBot.set(key, entry);
+    const at = Date.parse(str(row, 'occurred_at'));
+    if (!Number.isNaN(at)) {
+      const day = parisDay.format(new Date(at));
+      byDay.set(day, (byDay.get(day) ?? 0) + value);
+    }
+  }
+  return {
+    signals,
+    total,
+    byBot: [...byBot.values()].sort((a, b) => b.total - a.total),
+    byDay: [...byDay.entries()]
+      .map(([day, value]) => ({ day, total: value }))
+      .sort((a, b) => a.day.localeCompare(b.day)),
+  };
+}
+
+export async function listEvents(
+  db: DB,
+  userId: string,
+  demo: boolean,
+  options: { botId?: string | null; limit?: number } = {},
+): Promise<Signal[]> {
+  const limit = Math.min(300, Math.max(1, Math.floor(options.limit ?? 100)));
   return (
     await all<Row>(
       db,
-      'SELECT * FROM events WHERE user_id = ? AND (? = 1 OR is_demo = 0) ORDER BY occurred_at DESC LIMIT 100',
+      `SELECT * FROM events WHERE user_id = ? AND (? = 1 OR is_demo = 0) AND (? IS NULL OR bot_id = ?)
+       ORDER BY occurred_at DESC LIMIT ${limit}`,
       userId,
       demo ? 1 : 0,
+      options.botId ?? null,
+      options.botId ?? null,
     )
   ).map(mapSignal);
 }

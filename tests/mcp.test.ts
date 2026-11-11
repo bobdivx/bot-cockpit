@@ -47,19 +47,14 @@ describe('ingestion MCP', () => {
           occurred_at: occurred,
         },
       });
-      expect(JSON.stringify(result)).toContain('sans fiche');
-      const bot = await jsonBody<{ id: string }>(
-        await app.request('/api/bots', {
-          method: 'POST',
-          headers: authHeaders(cookie),
-          body: JSON.stringify({
-            name: 'Brume',
-            role: 'Relecture',
-            externalKey: 'brume-test',
-            status: 'offline',
-          }),
-        }),
-      );
+      expect(JSON.stringify(result)).toContain('créée automatiquement');
+      const ws = await jsonBody<{
+        bots: Array<{ id: string; name: string; externalKey: string; origin: string }>;
+      }>(await app.request('/api/workspace', { headers: { cookie } }));
+      const bot = ws.bots.find((item) => item.externalKey === 'brume-test');
+      expect(bot?.name).toBe('Brume Test');
+      expect(bot?.origin).toBe('auto');
+      if (!bot) throw new Error('fiche auto absente');
       await client.callTool({
         name: 'report_status',
         arguments: {

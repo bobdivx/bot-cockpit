@@ -125,10 +125,10 @@ describe('assistant de connexion Grok Bot', () => {
       await app.request('/api/onboarding', { headers: authHeaders(cookie, false) }),
     );
     expect(state.lastSignal?.botKey).toBe('grok-bot');
-    expect(state.lastSignal?.linked).toBe(false);
+    expect(state.lastSignal?.linked).toBe(true);
   });
 
-  it('propose de créer la fiche Grok Bot pour un signal sans fiche, puis la relie', async () => {
+  it('crée automatiquement la fiche Grok Bot au premier signal inconnu', async () => {
     const { app } = await testApp();
     const cookie = await ownerCookie(app);
     const minted = await jsonBody<Minted>(
@@ -139,30 +139,39 @@ describe('assistant de connexion Grok Bot', () => {
       headers: bearer(minted.token),
       body: JSON.stringify({ bot_id: 'grok-bot', status: 'idle', note: 'Connexion Grok Bot' }),
     });
-    expect(JSON.stringify(await report.json())).toContain('sans fiche');
-    const before = await jsonBody<OnboardingState>(
-      await app.request('/api/onboarding', { headers: authHeaders(cookie, false) }),
-    );
-    expect(before.lastSignal?.linked).toBe(false);
-    const created = await app.request(`/api/events/${before.lastSignal?.id}/materialize`, {
-      method: 'POST',
-      headers: authHeaders(cookie),
-      body: JSON.stringify({ name: 'Grok Bot' }),
+    const body = await jsonBody<{ created: boolean; linked: boolean; message: string }>(report);
+    expect(body.created).toBe(true);
+    expect(body.linked).toBe(true);
+    expect(body.message).toContain('Grok Bot');
+    const ws = await jsonBody<{
+      bots: Array<{ name: string; externalKey: string; status: string; origin: string }>;
+    }>(await app.request('/api/workspace', { headers: authHeaders(cookie, false) }));
+    expect(ws.bots).toHaveLength(1);
+    expect(ws.bots[0]).toMatchObject({
+      name: 'Grok Bot',
+      externalKey: 'grok-bot',
+      status: 'idle',
+      origin: 'auto',
     });
-    expect(created.status).toBe(201);
-    const bot = await jsonBody<{ name: string; externalKey: string; status: string }>(created);
-    expect(bot.name).toBe('Grok Bot');
-    expect(bot.externalKey).toBe('grok-bot');
-    const after = await jsonBody<OnboardingState>(
-      await app.request('/api/onboarding', { headers: authHeaders(cookie, false) }),
+    const next = await jsonBody<{ created: boolean; message: string }>(
+      await app.request('/api/v1/report', {
+        method: 'POST',
+        headers: bearer(minted.token),
+        body: JSON.stringify({ bot_id: 'grok-bot', name: 'tache', tokens: { total: 120 } }),
+      }),
     );
-    expect(after.lastSignal?.linked).toBe(true);
-    const next = await app.request('/api/v1/report', {
-      method: 'POST',
-      headers: bearer(minted.token),
-      body: JSON.stringify({ bot_id: 'grok-bot', status: 'working' }),
-    });
-    expect(JSON.stringify(await next.json())).not.toContain('sans fiche');
+    expect(next.created).toBe(false);
+    expect(next.message).toContain('relié');
+    const declared = await jsonBody<{
+      total: number;
+      byBot: Array<{ botKey: string; total: number }>;
+    }>(await app.request('/api/usage/declared', { headers: authHeaders(cookie, false) }));
+    expect(declared.total).toBe(120);
+    expect(declared.byBot[0]?.botKey).toBe('grok-bot');
+    const ws2 = await jsonBody<{ bots: unknown[] }>(
+      await app.request('/api/workspace', { headers: authHeaders(cookie, false) }),
+    );
+    expect(ws2.bots).toHaveLength(1);
   });
 
   it('régénère en révoquant l’ancien jeton, et respecte la révocation manuelle', async () => {
@@ -238,16 +247,55 @@ describe('assistant de connexion Grok Bot', () => {
     expect(restarted.skippedAt).toBeNull();
   });
 
-  it('migre une base v2 existante vers v3', async () => {
+  it('migre une base v2 existante vers v3 puis v4', async () => {
     const { db } = await testApp();
     await db.exec('DROP TABLE onboarding');
-    await db.run('DELETE FROM schema_migrations WHERE version = 3');
+    await db.run('DELETE FROM schema_migrations WHERE version >= 3');
     await migrate(db);
     const table = await db.get<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'onboarding'",
     );
     expect(table?.name).toBe('onboarding');
     const version = await db.get<{ v: number }>('SELECT MAX(version) AS v FROM schema_migrations');
-    expect(Number(version?.v)).toBe(3);
+    expect(Number(version?.v)).toBe(4);
+  });
+
+  it('v4 rattache les signaux orphelins existants à une fiche créée', async () => {
+    const { app, db } = await testApp();
+    await ownerCookie(app);
+    const user = await db.get<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const insert = (id: string, at: string, status: string, note: string) =>
+      db.run(
+        `INSERT INTO events (id, user_id, fingerprint, bot_id, reported_bot_key, reported_source, kind, name, detail, payload_json, occurred_at, received_at, linked, is_demo)
+         VALUES (?, ?, ?, NULL, 'grok-bot', 'bot', 'status', 'statut', ?, ?, ?, ?, 0, 0)`,
+        id,
+        String(user?.id),
+        `fp-${id}`,
+        note,
+        JSON.stringify({ tokens: null, status }),
+        at,
+        at,
+      );
+    await insert('e1', '2026-11-11T06:09:43.969Z', 'idle', 'Connexion Grok Bot');
+    await insert('e2', '2026-11-11T06:26:01.603Z', 'working', 'Diagnostic affichage');
+    await db.run('DELETE FROM schema_migrations WHERE version = 4');
+    await migrate(db);
+    await migrate(db);
+    const bots = await db.all<{ id: string; name: string; status: string; last_seen_at: string }>(
+      'SELECT id, name, status, last_seen_at FROM bots',
+    );
+    expect(bots).toHaveLength(1);
+    expect(bots[0]).toMatchObject({
+      name: 'Grok Bot',
+      status: 'working',
+      last_seen_at: '2026-11-11T06:26:01.603Z',
+    });
+    const linked = await db.get<{ n: number }>(
+      'SELECT count(*) AS n FROM events WHERE linked = 1 AND bot_id = ?',
+      String(bots[0]?.id),
+    );
+    expect(Number(linked?.n)).toBe(2);
+    const history = await db.get<{ n: number }>('SELECT count(*) AS n FROM bot_history');
+    expect(Number(history?.n)).toBe(2);
   });
 });

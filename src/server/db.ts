@@ -149,6 +149,130 @@ export async function migrate(db: DB): Promise<void> {
     await executeScript(db, SCHEMA_V3);
     await db.run('INSERT OR IGNORE INTO schema_migrations (version) VALUES (3)');
   }
+  if (version < 4) {
+    // v4: attach signals that arrived before fiches were auto-created. Claim the version
+    // first so concurrent cold starts do not backfill twice.
+    const claimed = await db.run('INSERT OR IGNORE INTO schema_migrations (version) VALUES (4)');
+    if (claimed > 0) await attachOrphanSignals(db);
+  }
+}
+
+const BOT_STATUS_SET = new Set(['offline', 'idle', 'working', 'away', 'blocked']);
+
+function humanize(key: string): string {
+  const words = key
+    .trim()
+    .split(/[-_.\s/:]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toLocaleUpperCase('fr-FR') + word.slice(1));
+  return (words.join(' ') || key).slice(0, 80);
+}
+
+/** Creates (or finds) a fiche for every unattached real signal and links the signals to it. */
+export async function attachOrphanSignals(db: DB, now = new Date()): Promise<number> {
+  const groups = await db.all<{ user_id: string; reported_bot_key: string }>(
+    `SELECT user_id, reported_bot_key FROM events
+     WHERE linked = 0 AND is_demo = 0 AND reported_bot_key <> ''
+     GROUP BY user_id, reported_bot_key`,
+  );
+  let attached = 0;
+  for (const group of groups) {
+    const userId = String(group.user_id);
+    const key = String(group.reported_bot_key);
+    let bot = await db.get<{ id: string }>(
+      `SELECT id FROM bots WHERE user_id = ? AND archived_at IS NULL AND is_demo = 0
+       AND (id = ? OR (external_key <> '' AND external_key = ?)) LIMIT 1`,
+      userId,
+      key,
+      key,
+    );
+    const iso = now.toISOString();
+    if (!bot) {
+      const id = randomBytes(16).toString('hex');
+      await db.run(
+        `INSERT INTO bots (id, user_id, external_key, name, role, brief, team_id, room_id, status, status_note, last_seen_at, is_demo, origin, created_at, updated_at)
+         VALUES (?, ?, ?, ?, '', '', NULL, NULL, 'offline', '', NULL, 0, 'auto', ?, ?)`,
+        id,
+        userId,
+        key,
+        humanize(key),
+        iso,
+        iso,
+      );
+      bot = { id };
+    }
+    const botId = String(bot.id);
+    const events = await db.all<{
+      id: string;
+      kind: string;
+      name: string;
+      detail: string;
+      payload_json: string;
+      occurred_at: string;
+    }>(
+      `SELECT id, kind, name, detail, payload_json, occurred_at FROM events
+       WHERE user_id = ? AND reported_bot_key = ? AND linked = 0 AND is_demo = 0
+       ORDER BY occurred_at ASC`,
+      userId,
+      key,
+    );
+    let lastAt: string | null = null;
+    let lastStatus: { status: string; note: string } | null = null;
+    for (const event of events) {
+      await db.run(
+        'UPDATE events SET bot_id = ?, linked = 1 WHERE id = ? AND user_id = ?',
+        botId,
+        String(event.id),
+        userId,
+      );
+      attached += 1;
+      const at = String(event.occurred_at);
+      if (!lastAt || at >= lastAt) lastAt = at;
+      let status: string | null = null;
+      try {
+        status =
+          (JSON.parse(String(event.payload_json || '{}')) as { status?: string }).status ?? null;
+      } catch {
+        status = null;
+      }
+      if (event.kind === 'status' && status && BOT_STATUS_SET.has(status)) {
+        const note = String(event.detail || event.name || '');
+        await db.run(
+          'INSERT INTO bot_history (id, user_id, bot_id, status, note, source, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          randomBytes(16).toString('hex'),
+          userId,
+          botId,
+          status,
+          note,
+          'mcp',
+          at,
+        );
+        lastStatus = { status, note: String(event.detail || '') };
+      }
+    }
+    if (lastAt) {
+      await db.run(
+        `UPDATE bots SET last_seen_at = ?, updated_at = ? WHERE id = ? AND user_id = ?
+         AND (last_seen_at IS NULL OR last_seen_at <= ?)`,
+        lastAt,
+        iso,
+        botId,
+        userId,
+        lastAt,
+      );
+    }
+    if (lastStatus) {
+      await db.run(
+        `UPDATE bots SET status = ?, status_note = ? WHERE id = ? AND user_id = ? AND last_seen_at = ?`,
+        lastStatus.status,
+        lastStatus.note,
+        botId,
+        userId,
+        lastAt,
+      );
+    }
+  }
+  return attached;
 }
 
 // v3: per-user onboarding wizard state (Grok Bot connection assistant).
