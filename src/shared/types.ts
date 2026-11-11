@@ -230,7 +230,15 @@ export type OnboardingState = {
   configured: boolean;
   token: { id: string; hint: string; createdAt: string; lastUsedAt: string | null } | null;
   lastCall: { tokenHint: string; at: string } | null;
-  lastSignal: { botKey: string; kind: string; name: string; receivedAt: string } | null;
+  lastSignal: {
+    id: string;
+    /** False when no fiche matches bot_id ("sans fiche correspondante"). */
+    linked: boolean;
+    botKey: string;
+    kind: string;
+    name: string;
+    receivedAt: string;
+  } | null;
   completedAt: string | null;
   skippedAt: string | null;
 };

@@ -125,6 +125,44 @@ describe('assistant de connexion Grok Bot', () => {
       await app.request('/api/onboarding', { headers: authHeaders(cookie, false) }),
     );
     expect(state.lastSignal?.botKey).toBe('grok-bot');
+    expect(state.lastSignal?.linked).toBe(false);
+  });
+
+  it('propose de créer la fiche Grok Bot pour un signal sans fiche, puis la relie', async () => {
+    const { app } = await testApp();
+    const cookie = await ownerCookie(app);
+    const minted = await jsonBody<Minted>(
+      await app.request('/api/onboarding/token', { method: 'POST', headers: authHeaders(cookie) }),
+    );
+    const report = await app.request('/api/v1/report', {
+      method: 'POST',
+      headers: bearer(minted.token),
+      body: JSON.stringify({ bot_id: 'grok-bot', status: 'idle', note: 'Connexion Grok Bot' }),
+    });
+    expect(JSON.stringify(await report.json())).toContain('sans fiche');
+    const before = await jsonBody<OnboardingState>(
+      await app.request('/api/onboarding', { headers: authHeaders(cookie, false) }),
+    );
+    expect(before.lastSignal?.linked).toBe(false);
+    const created = await app.request(`/api/events/${before.lastSignal?.id}/materialize`, {
+      method: 'POST',
+      headers: authHeaders(cookie),
+      body: JSON.stringify({ name: 'Grok Bot' }),
+    });
+    expect(created.status).toBe(201);
+    const bot = await jsonBody<{ name: string; externalKey: string; status: string }>(created);
+    expect(bot.name).toBe('Grok Bot');
+    expect(bot.externalKey).toBe('grok-bot');
+    const after = await jsonBody<OnboardingState>(
+      await app.request('/api/onboarding', { headers: authHeaders(cookie, false) }),
+    );
+    expect(after.lastSignal?.linked).toBe(true);
+    const next = await app.request('/api/v1/report', {
+      method: 'POST',
+      headers: bearer(minted.token),
+      body: JSON.stringify({ bot_id: 'grok-bot', status: 'working' }),
+    });
+    expect(JSON.stringify(await next.json())).not.toContain('sans fiche');
   });
 
   it('régénère en révoquant l’ancien jeton, et respecte la révocation manuelle', async () => {

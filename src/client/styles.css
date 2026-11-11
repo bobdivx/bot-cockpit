@@ -1797,3 +1797,19 @@ pre.snippet,
     display: none;
   }
 }
+.wizard-alt {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.wizard-alt summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--muted);
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+.wizard-alt > * + * {
+  margin-top: 10px;
+}

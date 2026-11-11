@@ -46,7 +46,7 @@ export async function readOnboarding(db: DB, userId: string, now: Date): Promise
   );
   const lastSignal = await get<Row>(
     db,
-    `SELECT reported_bot_key, kind, name, received_at FROM events
+    `SELECT id, reported_bot_key, kind, name, received_at, linked FROM events
      WHERE user_id = ? AND is_demo = 0 ORDER BY received_at DESC LIMIT 1`,
     userId,
   );
@@ -67,6 +67,8 @@ export async function readOnboarding(db: DB, userId: string, now: Date): Promise
     lastCall: used ? { tokenHint: String(used.hint), at: String(used.last_used_at) } : null,
     lastSignal: lastSignal
       ? {
+          id: String(lastSignal.id),
+          linked: Boolean(Number(lastSignal.linked ?? 0)),
           botKey: String(lastSignal.reported_bot_key),
           kind: String(lastSignal.kind),
           name: String(lastSignal.name),
