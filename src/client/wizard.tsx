@@ -116,10 +116,13 @@ export function SetupWizard({
   }
 
   useEffect(() => {
-    if (step !== 3 || connected) return;
+    // Keep polling until the first call AND its signal are visible: the token is marked
+    // used just before the signal is stored, so a poll can land in between.
+    const waiting = !connected || !state.lastSignal;
+    if (step < 3 || !waiting) return;
     const timer = window.setInterval(() => void refresh(), 3000);
     return () => window.clearInterval(timer);
-  }, [step, connected]);
+  }, [step, connected, Boolean(state.lastSignal)]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
