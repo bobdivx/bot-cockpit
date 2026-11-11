@@ -53,7 +53,7 @@ export function App() {
   if (!boot) {
     return (
       <AuthLayout>
-        <section class="panel auth-card">
+        <section class="card auth-card">
           <div class="auth-head">
             <p class="kicker">Connexion</p>
             <h2>Atelier indisponible</h2>
@@ -109,7 +109,7 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
   return (
     <AuthLayout>
       <form
-        class="panel auth-card"
+        class="card auth-card"
         onSubmit={(event) => {
           event.preventDefault();
           setError('');
@@ -126,18 +126,18 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
         <div class="auth-head">
           <p class="kicker">Configuration</p>
           <h2>Premier espace</h2>
-          <p class="meta">
+          <p class="muted">
             L’atelier démarre vide. Chaque compte a son propre espace, isolé des autres. Aucune
             fiche, aucun usage et aucune économie ne sont inventés.
           </p>
         </div>
         {boot.ephemeralStorage && (
-          <p class="note" role="status">
+          <p class="callout" role="status">
             Stockage temporaire : les données peuvent disparaître au prochain redémarrage à froid.
           </p>
         )}
         {boot.openSetup && (
-          <p class="note">
+          <p class="callout">
             Configuration initiale ouverte parce que le serveur est en mode développement.
           </p>
         )}
@@ -198,7 +198,7 @@ function Login({
   return (
     <AuthLayout>
       <form
-        class="panel auth-card"
+        class="card auth-card"
         onSubmit={(event) => {
           event.preventDefault();
           setError('');
@@ -221,7 +221,7 @@ function Login({
         }}
       >
         {allowSignup && (
-          <div class="nav-pills auth-tabs" role="tablist" aria-label="Accès">
+          <div class="segmented auth-tabs" role="tablist" aria-label="Accès">
             <button
               type="button"
               role="tab"
@@ -243,12 +243,11 @@ function Login({
           </div>
         )}
         <div class="auth-head">
-          <p class="kicker">{signup ? 'Nouvel espace' : 'Connexion'}</p>
-          <h2>{signup ? 'Créer votre espace' : 'Reprendre l’atelier'}</h2>
-          <p class="meta">
+          <h2>{signup ? 'Créer votre espace' : 'Bon retour'}</h2>
+          <p class="muted">
             {signup
-              ? 'Chaque adresse ouvre un espace isolé. Aucun compte externe n’est interrogé.'
-              : 'Session de votre espace. Aucun compte externe n’est interrogé.'}
+              ? 'Un espace privé, isolé des autres comptes. Un assistant vous aide ensuite à relier Grok Bot.'
+              : 'Connectez-vous pour retrouver vos bots.'}
           </p>
         </div>
         {error && (
@@ -289,21 +288,16 @@ function AuthLayout({ children }: { children: ComponentChildren }) {
   return (
     <div class="auth-screen">
       <header class="auth-top">
-        <Brand subtitle="Atelier de fiches" />
+        <Brand />
       </header>
       <main class="auth-main">
         <section class="auth-intro" aria-hidden="true">
-          <p class="kicker">Bot Cockpit</p>
-          <h1>Vos bots, leurs salles, leur usage réel.</h1>
-          <p class="meta">
-            Un bureau partagé pour suivre vos fiches, importer vos CSV d’usage et recevoir des
-            signalements volontaires. Rien n’est inventé.
-          </p>
-          <div class="chips">
-            <span class="badge tone-pine">Espace isolé par compte</span>
-            <span class="badge">Imports CSV</span>
-            <span class="badge">Signalements MCP</span>
-          </div>
+          <h1>Ce que font vos bots, en un coup d’œil.</h1>
+          <ul class="auth-points">
+            <li>Leur statut en direct et ce qui attend votre réponse</li>
+            <li>L’historique de leurs signaux, à l’heure de Paris</li>
+            <li>Leur usage de jetons, déclaré ou importé</li>
+          </ul>
         </section>
         {children}
       </main>

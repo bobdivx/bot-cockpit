@@ -10,6 +10,7 @@ import type {
   UsageRow,
   WebhookCall,
 } from '../shared/types.js';
+import { BOT_STATUSES } from '../shared/types.js';
 
 export type Row = Record<string, unknown>;
 
@@ -102,9 +103,15 @@ export function mapHistory(row: Row): HistoryEntry {
 
 export function mapSignal(row: Row): Signal {
   let partialTokens = false;
+  let status: BotStatus | null = null;
   try {
-    const payload = JSON.parse(str(row, 'payload_json') || '{}') as { tokens?: unknown };
+    const payload = JSON.parse(str(row, 'payload_json') || '{}') as {
+      tokens?: unknown;
+      status?: unknown;
+    };
     partialTokens = Boolean(payload.tokens && typeof payload.tokens === 'object');
+    if (typeof payload.status === 'string' && BOT_STATUSES.includes(payload.status as BotStatus))
+      status = payload.status as BotStatus;
   } catch {
     partialTokens = false;
   }
@@ -121,6 +128,7 @@ export function mapSignal(row: Row): Signal {
     linked: flag(row, 'linked'),
     isDemo: flag(row, 'is_demo'),
     partialTokens,
+    status,
   };
 }
 

@@ -7,8 +7,18 @@ import type {
   Workspace,
 } from '../shared/types';
 import { api } from './api';
-import { formatNumber } from './format';
-import { Badge, Field } from './ui';
+import { dayLabel, formatNumber } from './format';
+import { Badge, Card, EmptyState, Field, Icon, PageHeader } from './ui';
+
+type Declared = {
+  signals: number;
+  total: number;
+  byBot: Array<{ botId: string | null; botKey: string; signals: number; total: number }>;
+  byDay: Array<{ day: string; total: number }>;
+};
+
+type Tab = 'declared' | 'csv';
+const TAB_KEY = 'bc-usage-tab';
 
 const FIELDS: Array<{ key: keyof Omit<ColumnMapping, 'dateOrder'>; label: string }> = [
   { key: 'date', label: 'Date' },
@@ -54,6 +64,20 @@ export function Usage({ data, tick }: { data: Workspace; tick: number }) {
   const [hot, setHot] = useState(false);
   const [filters, setFilters] = useState({ from: '', to: '', model: '', source: '', bot: '' });
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [declared, setDeclared] = useState<Declared | null>(null);
+  const [tab, setTabState] = useState<Tab>(
+    sessionStorage.getItem(TAB_KEY) === 'csv' ? 'csv' : 'declared',
+  );
+  function setTab(next: Tab) {
+    sessionStorage.setItem(TAB_KEY, next);
+    setTabState(next);
+  }
+
+  useEffect(() => {
+    void api<Declared>('/api/usage/declared')
+      .then(setDeclared)
+      .catch(() => setDeclared({ signals: 0, total: 0, byBot: [], byDay: [] }));
+  }, [tick]);
 
   async function load() {
     const params = new URLSearchParams();
@@ -123,337 +147,422 @@ export function Usage({ data, tick }: { data: Workspace; tick: number }) {
 
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
+  const filtered = Object.values(filters).some(Boolean);
+  const botName = (id: string | null, key: string) =>
+    (id && data.bots.find((bot) => bot.id === id)?.name) || key;
 
   return (
-    <div class="stack">
-      {error && <div class="error">{error}</div>}
-      <section class="panel">
-        <p class="kicker">Usage observé</p>
-        <h2>Imports CSV</h2>
-        <p class="meta">
-          Aucun chiffre n’est inventé. Les colonnes varient : associez-les avant l’enregistrement.
-          Included et « - » restent inconnus, ils ne valent pas zéro.
+    <div class="page">
+      <PageHeader title="Usage" subtitle="Jetons déclarés par vos bots et relevés importés." />
+      <div class="segmented wide" role="group" aria-label="Source de l’usage">
+        <button type="button" aria-pressed={tab === 'declared'} onClick={() => setTab('declared')}>
+          Déclaré par les bots
+        </button>
+        <button type="button" aria-pressed={tab === 'csv'} onClick={() => setTab('csv')}>
+          Relevés CSV
+        </button>
+      </div>
+      {error && (
+        <p class="error" role="alert">
+          {error}
         </p>
-        <div
-          role="region"
-          aria-label="Dépôt de fichier"
-          class={`drop ${hot ? 'hot' : ''}`}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setHot(true);
-          }}
-          onDragLeave={() => setHot(false)}
-          onDrop={(event) => {
-            event.preventDefault();
-            setHot(false);
-            const file = event.dataTransfer?.files[0];
-            if (file) void upload(file);
-          }}
-        >
-          <p>{busy ? 'Lecture du fichier…' : 'Déposez un CSV UTF-8, 5 Mo maximum.'}</p>
-          <label class="btn" style="margin-top:10px">
-            Choisir un fichier
-            <input
-              type="file"
-              accept=".csv,text/csv,text/plain"
-              hidden
-              onChange={(event) => {
-                const file = event.currentTarget.files?.[0];
-                if (file) void upload(file);
-              }}
-            />
-          </label>
-          <p>
-            <a href="/api/fixtures/synthetique.csv">Télécharger la fixture synthétique</a>
-          </p>
-        </div>
-        {preview && (
-          <div class="stack">
-            <h3>{preview.filename}</h3>
-            <p class="meta">
-              {preview.counts.included} ligne(s) retenues, {preview.counts.inFileDuplicates}{' '}
-              doublon(s) dans le fichier, {preview.counts.skipped} ligne(s) vides.
-            </p>
-            {preview.warnings.map((warning) => (
-              <p key={warning} class="note">
-                {warning}
-              </p>
-            ))}
-            {preview.errors.map((item) => (
-              <p key={`${item.line}-${item.message}`} class="error">
-                {item.message}
-              </p>
-            ))}
-            <Field label="Ordre des dates">
-              <select
-                value={preview.mapping.dateOrder}
-                onChange={(event) =>
-                  setPreview({
-                    ...preview,
-                    mapping: {
-                      ...preview.mapping,
-                      dateOrder: event.currentTarget.value === 'mdy' ? 'mdy' : 'dmy',
-                    },
-                  })
-                }
-              >
-                <option value="dmy">Jour/mois/année</option>
-                <option value="mdy">Mois/jour/année</option>
-              </select>
-            </Field>
-            <div class="filters">
-              {FIELDS.map((field) => (
-                <Field key={field.key} label={field.label}>
-                  <select
-                    value={preview.mapping[field.key] ?? ''}
-                    onChange={(event) =>
-                      setPreview({
-                        ...preview,
-                        mapping: {
-                          ...preview.mapping,
-                          [field.key]: event.currentTarget.value || null,
-                        },
-                      })
-                    }
-                  >
-                    <option value="">— ignorer —</option>
-                    {preview.headers.map((header) => (
-                      <option key={header} value={header}>
-                        {header}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              ))}
-            </div>
-            <div class="btn-row">
-              <button class="btn" type="button" onClick={() => void reinterpret()} disabled={busy}>
-                Relire l’aperçu
-              </button>
-              <button
-                class="btn primary"
-                type="button"
-                onClick={() => void commit()}
-                disabled={busy}
-              >
-                Importer les lignes
-              </button>
-            </div>
-            <PreviewTable sample={preview.sample} />
-          </div>
-        )}
-      </section>
-      <section class="panel">
-        <div class="filters">
-          <Field label="Du">
-            <input
-              type="date"
-              value={filters.from}
-              onInput={(event) => setFilters({ ...filters, from: event.currentTarget.value })}
-            />
-          </Field>
-          <Field label="Au">
-            <input
-              type="date"
-              value={filters.to}
-              onInput={(event) => setFilters({ ...filters, to: event.currentTarget.value })}
-            />
-          </Field>
-          <Field label="Modèle">
-            <select
-              value={filters.model}
-              onChange={(event) => setFilters({ ...filters, model: event.currentTarget.value })}
-            >
-              <option value="">Tous</option>
-              {(summary?.models ?? []).map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Source">
-            <select
-              value={filters.source}
-              onChange={(event) => setFilters({ ...filters, source: event.currentTarget.value })}
-            >
-              <option value="">Toutes</option>
-              <option value="csv">CSV</option>
-              {data.settings.demoMode && <option value="demo">Démo</option>}
-            </select>
-          </Field>
-          <Field label="Fiche">
-            <select
-              value={filters.bot}
-              onChange={(event) => setFilters({ ...filters, bot: event.currentTarget.value })}
-            >
-              <option value="">Toutes</option>
-              <option value="unassigned">Non attribuées</option>
-              {data.bots
-                .filter((bot) => !bot.isDemo)
-                .map((bot) => (
-                  <option key={bot.id} value={bot.id}>
-                    {bot.name}
-                  </option>
-                ))}
-            </select>
-          </Field>
-        </div>
-        <a class="btn small" href={`/api/usage/export.csv${query.toString() ? `?${query}` : ''}`}>
-          Exporter ce filtre
-        </a>
-        {!summary ? (
-          <p class="meta">Calcul des lignes observées…</p>
+      )}
+
+      {tab === 'declared' &&
+        (!declared ? (
+          <div class="page-loading" aria-busy="true" />
+        ) : declared.signals === 0 ? (
+          <Card>
+            <EmptyState icon="usage" title="Aucun jeton déclaré">
+              Quand un bot ajoute un champ <code>tokens</code> à ses signaux (par exemple{' '}
+              <code>{'{"total": 1200}'}</code>), le total apparaît ici. Ces chiffres sont
+              auto-déclarés et ne sont jamais additionnés aux relevés CSV.
+            </EmptyState>
+          </Card>
         ) : (
           <>
-            {summary.warnings.map((warning) => (
-              <p key={warning} class="note">
-                {warning}
-              </p>
-            ))}
             <div class="stat-grid">
-              <article class="panel stat">
-                <span>Lignes</span>
-                <b>{formatNumber(summary.totals.rows)}</b>
+              <article class="stat">
+                <span>Jetons déclarés</span>
+                <b>{formatNumber(declared.total)}</b>
+                <small>Auto-déclaré, partiel</small>
               </article>
-              <article class="panel stat">
-                <span>Jetons totaux présents</span>
-                <b>{formatNumber(summary.totals.totalTokens)}</b>
-                <small>Pas un quota</small>
-              </article>
-              <article class="panel stat">
-                <span>Coût numérique</span>
-                <b>
-                  {summary.totals.costNumericSum == null
-                    ? 'Non chiffré'
-                    : formatNumber(summary.totals.costNumericSum)}
-                </b>
-                <small>Hors Included et hors texte</small>
-              </article>
-              <article class="panel stat">
-                <span>Non attribuées</span>
-                <b>{formatNumber(summary.totals.unassignedRows)}</b>
+              <article class="stat">
+                <span>Signaux avec jetons</span>
+                <b>{formatNumber(declared.signals)}</b>
               </article>
             </div>
-            <DayChart days={summary.byDay} />
-            <p class="meta">
-              Hauteur en racine du total observé, pour que les petits jours restent visibles. Ce
-              n’est pas un quota.
-            </p>
-            <div class="table-wrap">
-              <table>
-                <caption class="meta">
-                  Mêmes jours que le graphique, en calendrier du fichier.
-                </caption>
-                <thead>
-                  <tr>
-                    <th>Jour</th>
-                    <th>Lignes</th>
-                    <th>Total de jetons</th>
-                    <th>Coût numérique</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.byDay.map((day) => (
-                    <tr key={day.day}>
-                      <td>{day.day}</td>
-                      <td>{day.rows}</td>
-                      <td>{formatNumber(day.rowsWithTotal ? day.totalTokens : null)}</td>
-                      <td>
-                        {day.costNumericSum == null
-                          ? 'Non chiffré'
-                          : formatNumber(day.costNumericSum)}
-                      </td>
-                    </tr>
+            <Card title="Par bot">
+              <ul class="bar-list">
+                {[...declared.byBot]
+                  .sort((a, b) => b.total - a.total)
+                  .map((entry) => (
+                    <li key={entry.botKey}>
+                      <div class="bar-list-head">
+                        {entry.botId ? (
+                          <a href={`#/bots/${entry.botId}`}>{botName(entry.botId, entry.botKey)}</a>
+                        ) : (
+                          <span>{entry.botKey}</span>
+                        )}
+                        <strong>{formatNumber(entry.total)}</strong>
+                      </div>
+                      <div class="bar-track" aria-hidden="true">
+                        <span
+                          style={`width:${declared.total ? Math.max(2, (entry.total / declared.total) * 100) : 0}%`}
+                        />
+                      </div>
+                      <small class="muted">
+                        {entry.signals} signal{entry.signals > 1 ? 'x' : ''}
+                      </small>
+                    </li>
                   ))}
-                </tbody>
-              </table>
-            </div>
-            {summary.insights.map((insight) => (
-              <article key={insight.id} class="insight">
-                <h3>{insight.title}</h3>
-                <p>{insight.detail}</p>
-                <p class="rule">Règle : {insight.rule}</p>
-              </article>
-            ))}
+              </ul>
+            </Card>
+            <Card title="Par jour (heure de Paris)">
+              <DayChart days={declared.byDay.map((day) => ({ day: day.day, value: day.total }))} />
+            </Card>
           </>
-        )}
-      </section>
-      <section class="panel">
-        <h2>Lignes</h2>
-        <div class="table-wrap table-desktop">
-          <table>
-            <thead>
-              <tr>
-                <th>Jour</th>
-                <th>Total</th>
-                <th>Coût</th>
-                <th>Modèle</th>
-                <th>Source</th>
-                <th>Fiche</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id}>
-                  <td>{row.day ?? 'Sans date'}</td>
-                  <td>{formatNumber(row.totalTokens)}</td>
-                  <td>{costLabel(row)}</td>
-                  <td>{row.model || '—'}</td>
-                  <td>
-                    <Badge tone={row.isDemo ? 'demo' : 'neutral'}>
-                      {row.source === 'demo' ? 'Démo' : 'CSV'}
-                    </Badge>
-                  </td>
-                  <td>
-                    {row.isDemo ? (
-                      (row.botName ?? 'Non attribuée')
-                    ) : (
+        ))}
+
+      {tab === 'csv' && (
+        <>
+          <Card title="Importer un relevé">
+            <p class="muted">
+              Déposez l’export CSV de votre fournisseur. Aucun chiffre n’est inventé : « Included »
+              ou « - » restent inconnus.
+            </p>
+            <div
+              role="region"
+              aria-label="Dépôt de fichier"
+              class={`drop ${hot ? 'hot' : ''}`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setHot(true);
+              }}
+              onDragLeave={() => setHot(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setHot(false);
+                const file = event.dataTransfer?.files[0];
+                if (file) void upload(file);
+              }}
+            >
+              <p>{busy ? 'Lecture du fichier…' : 'CSV UTF-8, 5 Mo maximum.'}</p>
+              <label class="btn primary">
+                Choisir un fichier
+                <input
+                  type="file"
+                  accept=".csv,text/csv,text/plain"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    if (file) void upload(file);
+                  }}
+                />
+              </label>
+              <a class="link small" href="/api/fixtures/synthetique.csv">
+                Fichier d’exemple
+              </a>
+            </div>
+            {preview && (
+              <div class="preview">
+                <h3>{preview.filename}</h3>
+                <p class="muted">
+                  {preview.counts.included} ligne(s) retenue(s), {preview.counts.inFileDuplicates}{' '}
+                  doublon(s), {preview.counts.skipped} ligne(s) vide(s).
+                </p>
+                {preview.warnings.map((warning) => (
+                  <p key={warning} class="callout">
+                    {warning}
+                  </p>
+                ))}
+                {preview.errors.map((item) => (
+                  <p key={`${item.line}-${item.message}`} class="error">
+                    {item.message}
+                  </p>
+                ))}
+                <details class="disclosure">
+                  <summary>Associer les colonnes</summary>
+                  <div class="form-grid">
+                    <Field label="Ordre des dates">
                       <select
-                        value={row.botId ?? ''}
-                        onChange={(event) => {
-                          const botId = event.currentTarget.value || null;
-                          void api(`/api/usage/rows/${row.id}/assign`, {
-                            method: 'POST',
-                            body: JSON.stringify({ botId, note: 'attribution depuis le tableau' }),
-                          }).then(() => load());
-                        }}
+                        value={preview.mapping.dateOrder}
+                        onChange={(event) =>
+                          setPreview({
+                            ...preview,
+                            mapping: {
+                              ...preview.mapping,
+                              dateOrder: event.currentTarget.value === 'mdy' ? 'mdy' : 'dmy',
+                            },
+                          })
+                        }
                       >
-                        <option value="">
-                          Non attribuée{row.reportedBotKey ? ` (${row.reportedBotKey})` : ''}
-                        </option>
-                        {data.bots
-                          .filter((bot) => !bot.isDemo && !bot.archivedAt)
-                          .map((bot) => (
-                            <option key={bot.id} value={bot.id}>
-                              {bot.name}
+                        <option value="dmy">Jour/mois/année</option>
+                        <option value="mdy">Mois/jour/année</option>
+                      </select>
+                    </Field>
+                    {FIELDS.map((field) => (
+                      <Field key={field.key} label={field.label}>
+                        <select
+                          value={preview.mapping[field.key] ?? ''}
+                          onChange={(event) =>
+                            setPreview({
+                              ...preview,
+                              mapping: {
+                                ...preview.mapping,
+                                [field.key]: event.currentTarget.value || null,
+                              },
+                            })
+                          }
+                        >
+                          <option value="">— ignorer —</option>
+                          {preview.headers.map((header) => (
+                            <option key={header} value={header}>
+                              {header}
                             </option>
                           ))}
-                      </select>
-                    )}
-                    {row.assignmentProvenance && <div class="meta">{row.assignmentProvenance}</div>}
-                  </td>
-                </tr>
+                        </select>
+                      </Field>
+                    ))}
+                  </div>
+                  <button
+                    class="btn sm"
+                    type="button"
+                    onClick={() => void reinterpret()}
+                    disabled={busy}
+                  >
+                    Relire l’aperçu
+                  </button>
+                </details>
+                <PreviewList sample={preview.sample} />
+                <div class="row-actions">
+                  <button class="btn ghost" type="button" onClick={() => setPreview(null)}>
+                    Annuler
+                  </button>
+                  <button
+                    class="btn primary"
+                    type="button"
+                    onClick={() => void commit()}
+                    disabled={busy}
+                  >
+                    Importer les lignes
+                  </button>
+                </div>
+              </div>
+            )}
+          </Card>
+
+          <details class="disclosure filters-box" open={filtered}>
+            <summary>
+              <Icon name="search" size={16} /> Filtres{filtered ? ' (actifs)' : ''}
+            </summary>
+            <div class="form-grid">
+              <Field label="Du">
+                <input
+                  type="date"
+                  value={filters.from}
+                  onInput={(event) => setFilters({ ...filters, from: event.currentTarget.value })}
+                />
+              </Field>
+              <Field label="Au">
+                <input
+                  type="date"
+                  value={filters.to}
+                  onInput={(event) => setFilters({ ...filters, to: event.currentTarget.value })}
+                />
+              </Field>
+              <Field label="Modèle">
+                <select
+                  value={filters.model}
+                  onChange={(event) => setFilters({ ...filters, model: event.currentTarget.value })}
+                >
+                  <option value="">Tous</option>
+                  {(summary?.models ?? []).map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Source">
+                <select
+                  value={filters.source}
+                  onChange={(event) =>
+                    setFilters({ ...filters, source: event.currentTarget.value })
+                  }
+                >
+                  <option value="">Toutes</option>
+                  <option value="csv">CSV</option>
+                  {data.settings.demoMode && <option value="demo">Démo</option>}
+                </select>
+              </Field>
+              <Field label="Fiche">
+                <select
+                  value={filters.bot}
+                  onChange={(event) => setFilters({ ...filters, bot: event.currentTarget.value })}
+                >
+                  <option value="">Toutes</option>
+                  <option value="unassigned">Non attribuées</option>
+                  {data.bots
+                    .filter((bot) => !bot.isDemo)
+                    .map((bot) => (
+                      <option key={bot.id} value={bot.id}>
+                        {bot.name}
+                      </option>
+                    ))}
+                </select>
+              </Field>
+            </div>
+            <div class="row-actions">
+              {filtered && (
+                <button
+                  class="btn ghost sm"
+                  type="button"
+                  onClick={() => setFilters({ from: '', to: '', model: '', source: '', bot: '' })}
+                >
+                  Réinitialiser
+                </button>
+              )}
+              <a
+                class="btn sm"
+                href={`/api/usage/export.csv${query.toString() ? `?${query}` : ''}`}
+              >
+                Exporter en CSV
+              </a>
+            </div>
+          </details>
+
+          {!summary ? (
+            <div class="page-loading" aria-busy="true" />
+          ) : summary.totals.rows === 0 && !filtered ? (
+            <Card>
+              <EmptyState icon="usage" title="Aucun relevé importé">
+                Importez un CSV ci-dessus pour voir vos jetons et coûts par jour.
+              </EmptyState>
+            </Card>
+          ) : (
+            <>
+              {summary.warnings.map((warning) => (
+                <p key={warning} class="callout">
+                  {warning}
+                </p>
               ))}
-            </tbody>
-          </table>
-        </div>
-        {rows.length === 0 && <p class="meta">Aucune ligne pour ce filtre.</p>}
-      </section>
-      <section class="panel">
-        <h2>Imports enregistrés</h2>
-        {data.imports.length === 0 && <p class="meta">Aucun import conservé.</p>}
-        {data.imports.map((item) => (
-          <ImportRow
-            key={item.id}
-            item={item}
-            confirm={confirmId === item.id}
-            onAsk={() => setConfirmId(item.id)}
-            onCancel={() => setConfirmId(null)}
-            onDone={() => void load()}
-          />
-        ))}
-      </section>
+              <div class="stat-grid">
+                <article class="stat">
+                  <span>Lignes</span>
+                  <b>{formatNumber(summary.totals.rows)}</b>
+                </article>
+                <article class="stat">
+                  <span>Jetons</span>
+                  <b>{formatNumber(summary.totals.totalTokens)}</b>
+                  <small>Pas un quota</small>
+                </article>
+                <article class="stat">
+                  <span>Coût chiffré</span>
+                  <b>
+                    {summary.totals.costNumericSum == null
+                      ? '—'
+                      : formatNumber(summary.totals.costNumericSum)}
+                  </b>
+                  <small>Hors « Included »</small>
+                </article>
+                <article class="stat">
+                  <span>Non attribuées</span>
+                  <b>{formatNumber(summary.totals.unassignedRows)}</b>
+                </article>
+              </div>
+              <Card title="Jetons par jour">
+                <DayChart
+                  days={summary.byDay.map((day) => ({
+                    day: day.day,
+                    value: day.totalTokens,
+                    partial: day.rowsWithTotal < day.rows,
+                  }))}
+                />
+                <p class="muted small">Échelle racine pour garder les petits jours visibles.</p>
+              </Card>
+              {summary.insights.length > 0 && (
+                <Card title="À noter">
+                  <ul class="plain-list">
+                    {summary.insights.map((insight) => (
+                      <li key={insight.id}>
+                        <strong>{insight.title}</strong>
+                        <p class="muted small">{insight.detail}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </Card>
+              )}
+              <Card title={`Lignes (${rows.length})`}>
+                {rows.length === 0 ? (
+                  <p class="muted">Aucune ligne pour ce filtre.</p>
+                ) : (
+                  <ul class="usage-rows">
+                    {rows.map((row) => (
+                      <li key={row.id} class="usage-row">
+                        <div class="usage-row-top">
+                          <strong>{row.day ? dayLabel(row.day) : 'Sans date'}</strong>
+                          <span class="num">{formatNumber(row.totalTokens)}</span>
+                        </div>
+                        <div class="usage-row-meta">
+                          <span>{row.model || 'Modèle inconnu'}</span>
+                          <span>{costLabel(row)}</span>
+                          {row.isDemo && <Badge tone="warn">Démo</Badge>}
+                        </div>
+                        {row.isDemo ? (
+                          <small class="muted">{row.botName ?? 'Non attribuée'}</small>
+                        ) : (
+                          <select
+                            aria-label="Attribuer à une fiche"
+                            value={row.botId ?? ''}
+                            onChange={(event) => {
+                              const botId = event.currentTarget.value || null;
+                              void api(`/api/usage/rows/${row.id}/assign`, {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                  botId,
+                                  note: 'attribution depuis la liste',
+                                }),
+                              }).then(() => load());
+                            }}
+                          >
+                            <option value="">
+                              Non attribuée{row.reportedBotKey ? ` (${row.reportedBotKey})` : ''}
+                            </option>
+                            {data.bots
+                              .filter((bot) => !bot.isDemo && !bot.archivedAt)
+                              .map((bot) => (
+                                <option key={bot.id} value={bot.id}>
+                                  {bot.name}
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Card>
+            </>
+          )}
+          {data.imports.length > 0 && (
+            <Card title="Imports enregistrés">
+              <ul class="plain-list">
+                {data.imports.map((item) => (
+                  <ImportRow
+                    key={item.id}
+                    item={item}
+                    confirm={confirmId === item.id}
+                    onAsk={() => setConfirmId(item.id)}
+                    onCancel={() => setConfirmId(null)}
+                    onDone={() => void load()}
+                  />
+                ))}
+              </ul>
+            </Card>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -464,75 +573,59 @@ function costLabel(row: Pick<UsageRow, 'costKind' | 'costRaw' | 'costValue'>): s
   return row.costRaw ? `Inconnu · ${row.costRaw}` : 'Inconnu';
 }
 
-function DayChart({ days }: { days: UsageSummary['byDay'] }) {
-  if (days.length === 0) return <p class="meta">Pas de jour observé sur ce filtre.</p>;
-  const width = 680;
-  const height = 200;
-  const max = Math.max(...days.map((day) => day.totalTokens), 1);
-  const gap = 16;
-  const bar = Math.min(72, Math.max(18, (width - gap * days.length) / days.length));
-  const plot = height - 36;
+function DayChart({ days }: { days: Array<{ day: string; value: number; partial?: boolean }> }) {
+  if (days.length === 0) return <p class="muted">Pas de jour observé.</p>;
+  const shown = days.slice(-14);
+  const max = Math.max(...shown.map((day) => day.value), 1);
   return (
-    <svg
-      class="chart"
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label="Jetons totaux observés par jour, échelle racine"
-    >
-      {days.map((day, index) => {
-        const share = day.totalTokens <= 0 ? 0 : Math.sqrt(day.totalTokens) / Math.sqrt(max);
-        const h = day.totalTokens <= 0 ? 3 : Math.max(12, share * plot);
-        const partial = day.rowsWithTotal < day.rows;
-        const x = 8 + index * (bar + gap);
+    <div class="day-chart" role="img" aria-label="Jetons par jour, échelle racine">
+      {shown.map((day) => {
+        const share = day.value <= 0 ? 0 : Math.sqrt(day.value) / Math.sqrt(max);
         return (
-          <g key={day.day}>
-            <rect
-              class={partial ? 'bar partial' : 'bar'}
-              x={x}
-              y={height - 28 - h}
-              width={bar}
-              height={h}
-              rx={Math.min(4, h / 2)}
-            />
-            <text x={x} y={height - 8} fontSize="11">
-              {day.day.slice(5)}
-            </text>
-          </g>
+          <div key={day.day} class="day-col" title={`${day.day} : ${formatNumber(day.value)}`}>
+            <span class="day-val">{compact(day.value)}</span>
+            <span class="day-bar-wrap">
+              <span
+                class={`day-bar ${day.partial ? 'partial' : ''}`}
+                style={`height:${day.value <= 0 ? 2 : Math.max(6, share * 100)}%`}
+              />
+            </span>
+            <span class="day-label">
+              {day.day.slice(8)}/{day.day.slice(5, 7)}
+            </span>
+          </div>
         );
       })}
-    </svg>
+    </div>
   );
 }
 
-function PreviewTable({ sample }: { sample: Preview['sample'] }) {
-  if (sample.length === 0) return <p class="meta">Aucune ligne lisible avec ce mapping.</p>;
+function compact(value: number): string {
+  return new Intl.NumberFormat('fr-FR', { notation: 'compact', maximumFractionDigits: 1 }).format(
+    value,
+  );
+}
+
+function PreviewList({ sample }: { sample: Preview['sample'] }) {
+  if (sample.length === 0) return <p class="muted">Aucune ligne lisible avec ces colonnes.</p>;
   return (
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Ligne</th>
-            <th>Jour</th>
-            <th>Total</th>
-            <th>Coût</th>
-            <th>Modèle</th>
-            <th>Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sample.map((row) => (
-            <tr key={row.line}>
-              <td>{row.line}</td>
-              <td>{row.day ?? '—'}</td>
-              <td>{formatNumber(row.totalTokens)}</td>
-              <td>{costLabel(row)}</td>
-              <td>{row.model || '—'}</td>
-              <td>{row.messages.join(' ') || '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <ul class="usage-rows compact">
+      {sample.slice(0, 8).map((row) => (
+        <li key={row.line} class="usage-row">
+          <div class="usage-row-top">
+            <strong>
+              Ligne {row.line} · {row.day ?? 'sans date'}
+            </strong>
+            <span class="num">{formatNumber(row.totalTokens)}</span>
+          </div>
+          <div class="usage-row-meta">
+            <span>{row.model || 'Modèle inconnu'}</span>
+            <span>{costLabel(row)}</span>
+          </div>
+          {row.messages.length > 0 && <small class="muted">{row.messages.join(' ')}</small>}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -550,15 +643,20 @@ function ImportRow({
   onDone: () => void;
 }) {
   return (
-    <article class="insight">
-      <strong>{item.filename}</strong>
-      <p class="meta">
-        {item.rowCount} ligne(s), {item.duplicateCount} doublon(s), {item.skippedCount} ignorée(s).
-      </p>
+    <li class="import-row">
+      <div>
+        <strong class="break">{item.filename}</strong>
+        <small class="muted">
+          {item.rowCount} ligne(s), {item.duplicateCount} doublon(s), {item.skippedCount} ignorée(s)
+        </small>
+      </div>
       {confirm ? (
-        <div class="btn-row">
+        <div class="row-actions">
+          <button class="btn sm ghost" type="button" onClick={onCancel}>
+            Annuler
+          </button>
           <button
-            class="btn danger small"
+            class="btn danger sm"
             type="button"
             onClick={() =>
               void api(`/api/usage/imports/${item.id}`, { method: 'DELETE' }).then(() => {
@@ -567,17 +665,14 @@ function ImportRow({
               })
             }
           >
-            Confirmer la suppression
-          </button>
-          <button class="btn small" type="button" onClick={onCancel}>
-            Annuler
+            Supprimer
           </button>
         </div>
       ) : (
-        <button class="btn small" type="button" onClick={onAsk}>
-          Supprimer cet import
+        <button class="btn sm danger-ghost" type="button" onClick={onAsk}>
+          Supprimer
         </button>
       )}
-    </article>
+    </li>
   );
 }

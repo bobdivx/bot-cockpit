@@ -76,6 +76,8 @@ export type Signal = {
   linked: boolean;
   isDemo: boolean;
   partialTokens: boolean;
+  /** Status carried by a status signal, when valid. */
+  status: BotStatus | null;
 };
 
 export type UsageImport = {

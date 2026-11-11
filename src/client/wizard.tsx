@@ -212,15 +212,15 @@ export function SetupWizard({
   }
 
   const linkHint = unlinked ? (
-    <div class="note stack-tight link-hint">
+    <div class="callout stack-tight link-hint">
       <strong>Signal reçu sans fiche correspondante</strong>
-      <p class="meta">
+      <p class="muted">
         Grok Bot envoie bot_id « {unlinked.botKey} », mais aucune fiche ne porte cet identifiant.
-        Créez la fiche pour voir ses statuts dans le bureau.
+        Créez la fiche pour suivre ses statuts.
       </p>
       <div class="btn-row">
         <button
-          class="btn small primary"
+          class="btn sm primary"
           type="button"
           disabled={linking}
           onClick={() => void createFiche()}
@@ -230,8 +230,8 @@ export function SetupWizard({
       </div>
     </div>
   ) : state.lastSignal?.linked ? (
-    <p class="note">
-      Fiche reliée : les statuts de « {state.lastSignal.botKey} » s’affichent dans le bureau.
+    <p class="callout">
+      Fiche reliée : les statuts de « {state.lastSignal.botKey} » s’affichent dans sa fiche.
     </p>
   ) : null;
 
@@ -251,7 +251,7 @@ export function SetupWizard({
               Étape {step + 1}/{STEPS.length}
             </p>
           </div>
-          <button class="btn small ghost" type="button" onClick={() => void skip()}>
+          <button class="btn sm ghost" type="button" onClick={() => void skip()}>
             Passer pour l’instant
           </button>
         </header>
@@ -277,7 +277,7 @@ export function SetupWizard({
         {step === 0 && (
           <section class="wizard-body">
             <h2 id="wizard-title">Relier Grok Bot à votre espace</h2>
-            <p class="meta">
+            <p class="muted">
               Bot Cockpit ne va rien chercher chez Grok Bot : c’est Grok Bot qui envoie ses statuts
               et ses événements à votre espace, avec un jeton personnel que vous pouvez révoquer à
               tout moment.
@@ -295,7 +295,7 @@ export function SetupWizard({
                 <b>3. Un test</b> : l’étape passe au vert dès que le premier appel arrive.
               </li>
             </ul>
-            <p class="note">
+            <p class="callout">
               Aucun mot de passe Grok Bot n’est demandé. Les données reçues restent dans votre
               espace.
             </p>
@@ -305,7 +305,7 @@ export function SetupWizard({
         {step === 1 && (
           <section class="wizard-body">
             <h2 id="wizard-title">Coller dans Grok Bot</h2>
-            <p class="meta">
+            <p class="muted">
               Ouvrez une conversation avec Grok Bot et collez ce texte. Il ne contient pas de jeton
               : Grok Bot va vous le demander dans sa case sécurisée, à l’étape suivante.
             </p>
@@ -319,49 +319,39 @@ export function SetupWizard({
         {step === 2 && (
           <section class="wizard-body">
             <h2 id="wizard-title">Votre jeton Grok Bot</h2>
-            <p class="meta">
+            <p class="muted">
               Grok Bot affiche maintenant une case sécurisée « BOT_COCKPIT_TOKEN ». Générez le
               jeton, copiez-le et collez-le dans cette case, pas dans la conversation.
             </p>
             {fresh ? (
-              <div class="note stack-tight">
+              <div class="callout stack-tight">
                 <strong>
                   Collez ce jeton dans la case sécurisée que Grok Bot vient d’afficher.
                 </strong>
                 <p class="token-once">{fresh}</p>
-                <p class="meta">Il ne sera plus affiché ici.</p>
+                <p class="muted">Il ne sera plus affiché ici.</p>
                 <div class="btn-row">
                   <button
-                    class="btn small primary"
+                    class="btn sm primary"
                     type="button"
                     onClick={() => void copy('token', fresh)}
                   >
                     {copied === 'token' ? 'Copié ✓' : 'Copier le jeton'}
                   </button>
-                  <button
-                    class="btn small"
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void mint()}
-                  >
+                  <button class="btn sm" type="button" disabled={busy} onClick={() => void mint()}>
                     Régénérer
                   </button>
                 </div>
               </div>
             ) : token ? (
-              <div class="note stack-tight">
+              <div class="callout stack-tight">
                 <strong>Un jeton Grok Bot existe déjà ({token.hint}…).</strong>
-                <p class="meta">
+                <p class="muted">
                   Sa valeur n’est plus lisible. Gardez-le s’il est déjà enregistré dans Grok Bot, ou
                   régénérez-en un (l’ancien sera révoqué).
                 </p>
                 <div class="btn-row">
-                  <button
-                    class="btn small"
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void mint()}
-                  >
+                  <button class="btn sm" type="button" disabled={busy} onClick={() => void mint()}>
                     Régénérer le jeton
                   </button>
                 </div>
@@ -373,7 +363,7 @@ export function SetupWizard({
             )}
             <details class="wizard-alt" open={alt !== 'none'}>
               <summary>Autre client que Grok Bot (curl, MCP)</summary>
-              <div class="nav-pills wizard-tabs" role="tablist" aria-label="Méthode">
+              <div class="wizard-tabs" role="tablist" aria-label="Méthode">
                 {(
                   [
                     ['curl', 'curl'],
@@ -395,24 +385,22 @@ export function SetupWizard({
               {alt !== 'none' && (
                 <>
                   <pre class="snippet wizard-snippet">{altSnippet}</pre>
-                  <button
-                    class="btn small"
-                    type="button"
-                    onClick={() => void copy(alt, altSnippet)}
-                  >
+                  <button class="btn sm" type="button" onClick={() => void copy(alt, altSnippet)}>
                     {copied === alt ? 'Copié ✓' : 'Copier'}
                   </button>
                 </>
               )}
             </details>
-            <p class="meta">Tous vos jetons restent visibles et révocables dans l’onglet Liens.</p>
+            <p class="muted">
+              Tous vos jetons restent visibles et révocables dans Réglages → Jetons d’accès.
+            </p>
           </section>
         )}
 
         {step === 3 && (
           <section class="wizard-body">
             <h2 id="wizard-title">Tester la connexion</h2>
-            <p class="meta">
+            <p class="muted">
               Une fois le jeton enregistré, Grok Bot envoie son statut de test. Cette étape se met à
               jour toute seule ; la commande ci-dessous permet aussi de tester à la main.
             </p>
@@ -439,14 +427,14 @@ export function SetupWizard({
             <pre class="snippet wizard-snippet">{curlSnippet(origin, fresh)}</pre>
             <div class="btn-row">
               <button
-                class="btn small"
+                class="btn sm"
                 type="button"
                 onClick={() => void copy('curl-test', curlSnippet(origin, fresh))}
               >
                 {copied === 'curl-test' ? 'Copié ✓' : 'Copier la commande'}
               </button>
               <button
-                class="btn small"
+                class="btn sm"
                 type="button"
                 disabled={checking}
                 onClick={() => void refresh()}
@@ -460,15 +448,15 @@ export function SetupWizard({
         {step === 4 && (
           <section class="wizard-body">
             <h2 id="wizard-title">{connected ? 'Grok Bot est relié' : 'Presque fini'}</h2>
-            <p class="meta">
+            <p class="muted">
               {connected
-                ? 'Les statuts et événements envoyés par Grok Bot apparaissent dans le bureau et le journal d’activité. Pour qu’un statut s’affiche sur une fiche, donnez à la fiche l’identifiant « grok-bot ».'
+                ? 'Les statuts et événements de Grok Bot apparaissent sur l’accueil, dans sa fiche (créée automatiquement au premier signal) et dans l’activité.'
                 : 'Aucun appel reçu pour l’instant. Vous pourrez reprendre à tout moment depuis le bandeau ou Réglages.'}
             </p>
             {connected && linkHint}
             <ul class="wizard-list">
               <li>
-                <b>Révoquer ou régénérer :</b> onglet Liens ou Réglages → Relancer l’assistant.
+                <b>Révoquer ou régénérer :</b> Réglages → Jetons d’accès, ou Relancer l’assistant.
               </li>
               <li>
                 <b>Rien n’est compté comme quota :</b> les jetons déclarés par Grok Bot restent
