@@ -220,3 +220,17 @@ export type Workspace = {
   imports: UsageImport[];
   webhookActions: string[];
 };
+
+export type OnboardingStatus = 'pending' | 'skipped' | 'done';
+
+export type OnboardingState = {
+  status: OnboardingStatus;
+  step: number;
+  /** True once any active token has been used by a bot call (MCP or REST). */
+  configured: boolean;
+  token: { id: string; hint: string; createdAt: string; lastUsedAt: string | null } | null;
+  lastCall: { tokenHint: string; at: string } | null;
+  lastSignal: { botKey: string; kind: string; name: string; receivedAt: string } | null;
+  completedAt: string | null;
+  skippedAt: string | null;
+};

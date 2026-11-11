@@ -141,13 +141,30 @@ export async function migrate(db: DB): Promise<void> {
   if (version < 1) {
     await executeScript(db, SCHEMA_V2);
     await db.run('INSERT INTO schema_migrations (version) VALUES (2)');
-    return;
-  }
-  if (version < 2) {
+  } else if (version < 2) {
     await upgradeV1ToV2(db);
     await db.run('INSERT INTO schema_migrations (version) VALUES (2)');
   }
+  if (version < 3) {
+    await executeScript(db, SCHEMA_V3);
+    await db.run('INSERT OR IGNORE INTO schema_migrations (version) VALUES (3)');
+  }
 }
+
+// v3: per-user onboarding wizard state (Grok Bot connection assistant).
+const SCHEMA_V3 = `
+CREATE TABLE IF NOT EXISTS onboarding (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  step INTEGER NOT NULL DEFAULT 0,
+  token_id TEXT,
+  token_created_at TEXT,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  skipped_at TEXT
+)
+`;
 
 const SCHEMA_V2 = `
 CREATE TABLE users (

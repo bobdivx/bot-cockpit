@@ -1,7 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, api } from './api';
-import { Shell } from './shell';
+import { Shell, WIZARD_SEEN } from './shell';
 import { Brand, Field } from './ui';
 
 type Boot = {
@@ -15,6 +15,7 @@ type Boot = {
 export function App() {
   const [boot, setBoot] = useState<Boot | null>(null);
   const [email, setEmail] = useState<string | null>(null);
+  const [justSignedUp, setJustSignedUp] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -69,13 +70,35 @@ export function App() {
     return (
       <Shell
         email={email}
+        justSignedUp={justSignedUp}
         ephemeralStorage={Boolean(boot.ephemeralStorage)}
-        onLogout={() => setEmail(null)}
+        onLogout={() => {
+          sessionStorage.removeItem(WIZARD_SEEN);
+          setJustSignedUp(false);
+          setEmail(null);
+        }}
       />
     );
   if (boot.needsSetup && !boot.allowSignup)
-    return <Setup boot={boot} onDone={(next) => setEmail(next)} />;
-  return <Login allowSignup={boot.allowSignup !== false} onDone={(next) => setEmail(next)} />;
+    return (
+      <Setup
+        boot={boot}
+        onDone={(next) => {
+          setJustSignedUp(true);
+          setEmail(next);
+        }}
+      />
+    );
+  return (
+    <Login
+      allowSignup={boot.allowSignup !== false}
+      onDone={(next, created) => {
+        sessionStorage.removeItem(WIZARD_SEEN);
+        setJustSignedUp(created);
+        setEmail(next);
+      }}
+    />
+  );
 }
 
 function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }) {
@@ -155,7 +178,13 @@ function Setup({ boot, onDone }: { boot: Boot; onDone: (email: string) => void }
   );
 }
 
-function Login({ allowSignup, onDone }: { allowSignup: boolean; onDone: (email: string) => void }) {
+function Login({
+  allowSignup,
+  onDone,
+}: {
+  allowSignup: boolean;
+  onDone: (email: string, created: boolean) => void;
+}) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [mode, setMode] = useState<'login' | 'signup'>('login');
@@ -178,7 +207,7 @@ function Login({ allowSignup, onDone }: { allowSignup: boolean; onDone: (email: 
             method: 'POST',
             body: JSON.stringify({ email, password }),
           })
-            .then((body) => onDone(body.email))
+            .then((body) => onDone(body.email, signup))
             .catch((caught) =>
               setError(
                 caught instanceof Error

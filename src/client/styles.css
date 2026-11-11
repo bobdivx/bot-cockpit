@@ -1574,3 +1574,226 @@ pre.snippet,
     min-height: 44px;
   }
 }
+
+/* ---- Setup wizard & incomplete banner (t753u) ---- */
+.setup-pill {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.setup-pill i {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--warn);
+  flex: none;
+}
+.setup-pill .btn {
+  margin-left: auto;
+}
+.wizard {
+  width: min(640px, 100%);
+  max-height: min(92dvh, 860px);
+  padding: 18px 20px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.wizard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wizard-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.wizard-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.wizard-steps li {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  position: relative;
+  color: var(--muted);
+}
+.wizard-steps li span {
+  width: 28px;
+  height: 28px;
+  border-radius: 99px;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+.wizard-steps li small {
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.wizard-steps li.on span {
+  background: #1c2430;
+  color: #fff;
+  border-color: transparent;
+}
+.wizard-steps li.on {
+  color: var(--ink);
+}
+.wizard-steps li.done span {
+  background: var(--pine-soft);
+  color: var(--pine);
+  border-color: transparent;
+}
+.wizard-body {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.wizard-body h2 {
+  font-size: 1.45rem;
+  line-height: 1.15;
+}
+.wizard-body code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 6px;
+}
+.wizard-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.wizard-list li {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  line-height: 1.4;
+  font-size: 0.92rem;
+}
+.stack-tight {
+  display: grid;
+  gap: 8px;
+}
+.wizard .wizard-tabs {
+  order: 0;
+  width: 100%;
+  box-shadow: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+.wizard .wizard-tabs button {
+  min-height: 38px;
+}
+.wizard-head .btn {
+  white-space: nowrap;
+}
+.wizard-snippet {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wizard-test {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+}
+.wizard-test i {
+  width: 14px;
+  height: 14px;
+  border-radius: 99px;
+  flex: none;
+  background: var(--warn);
+}
+.wizard-test.wait i {
+  animation: glow 1.4s ease-in-out infinite;
+}
+.wizard-test.ok {
+  background: var(--pine-soft);
+  border-color: transparent;
+}
+.wizard-test.ok i {
+  background: var(--pine);
+}
+.wizard-test small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.wizard-foot {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 0 calc(16px + env(safe-area-inset-bottom));
+  margin-top: auto;
+  background: var(--raised-solid);
+  border-top: 1px solid var(--line);
+}
+.wizard-foot .btn {
+  min-width: 120px;
+}
+.wizard-foot .btn:disabled,
+.wizard .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.setup-card .topbar {
+  align-items: center;
+}
+
+@media (max-width: 640px) {
+  .wizard-back {
+    padding: 0;
+    align-items: stretch;
+  }
+  .wizard {
+    width: 100%;
+    max-height: none;
+    height: 100dvh;
+    border-radius: 0;
+    padding: 12px 14px 0;
+    gap: 12px;
+  }
+  .wizard-steps li small {
+    font-size: 0.62rem;
+  }
+  .wizard-body h2 {
+    font-size: 1.25rem;
+  }
+  .wizard-foot .btn {
+    flex: 1;
+    min-width: 0;
+  }
+  .wizard-snippet {
+    max-height: 38dvh;
+  }
+  .setup-pill span {
+    display: none;
+  }
+}

@@ -11,6 +11,11 @@ export function Links({ tokens, reload }: { tokens: AccessToken[]; reload: () =>
   const snippet = `# Signalement volontaire vers Bot Cockpit
 # Texte à copier plus tard. Rien n’est installé dans un compte.
 
+API REST (le plus simple, ex. Grok Bot avec curl) :
+POST ${origin}/api/v1/report
+GET  ${origin}/api/v1/ping
+Corps : {"bot_id":"grok-bot","status":"working","note":"..."} ou {"bot_id":"grok-bot","name":"evenement","detail":"..."}
+
 URL MCP : ${origin}/mcp
 En-tête : Authorization: Bearer <jeton affiché une seule fois>
 Ne placez pas le jeton dans l’URL.

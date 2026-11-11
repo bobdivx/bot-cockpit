@@ -4,7 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { z } from 'zod';
 import type { ColumnMapping } from '../shared/types.js';
@@ -19,6 +19,12 @@ import {
   toCsv,
 } from './csv.js';
 import type { DB } from './db.js';
+import {
+  readOnboarding,
+  restartOnboarding,
+  rotateOnboardingToken,
+  updateOnboarding,
+} from './onboarding.js';
 import { packById, packMarkdown, packSummaries } from './packs.js';
 import {
   cleanFilename,
@@ -293,8 +299,107 @@ export function createApp(options: AppOptions) {
     });
   });
 
+  // Bot-facing REST endpoints (Bearer token, no cookie, no browser header).
+  const reportSchema = z.object({
+    bot_id: z.string().min(1).max(120),
+    status: z.enum(['offline', 'idle', 'working', 'away', 'blocked']).optional(),
+    name: z.string().min(1).max(120).optional(),
+    note: z.string().max(500).optional(),
+    detail: z.string().max(1000).optional(),
+    source: z.string().max(80).optional(),
+    occurred_at: z.string().max(40).optional(),
+    tokens: z
+      .object({
+        input: z.number().int().nonnegative().max(1_000_000_000_000).optional(),
+        cache: z.number().int().nonnegative().max(1_000_000_000_000).optional(),
+        output: z.number().int().nonnegative().max(1_000_000_000_000).optional(),
+        total: z.number().int().nonnegative().max(1_000_000_000_000).optional(),
+      })
+      .optional(),
+  });
+
+  const botAuth = async (c: Context<AppEnv>) => {
+    const url = new URL(c.req.url);
+    if (['token', 'access_token', 'key'].some((key) => url.searchParams.has(key)))
+      return { error: c.json({ error: 'Le jeton ne doit pas transiter dans l’URL.' }, 400) };
+    const ip = clientIp(c);
+    if (!allow(`mcp-ip:${ip}`, 300, 60_000))
+      return { error: c.json({ error: 'Trop de signalements.' }, 429) };
+    const match = /^Bearer\s+(.+)$/i.exec((c.req.header('authorization') ?? '').trim());
+    const secret = match?.[1]?.trim() ?? '';
+    if (!secret) return { error: c.json({ error: 'Jeton Bearer requis.' }, 401) };
+    const token = await authenticateToken(options.db, secret);
+    if (!token) return { error: c.json({ error: 'Jeton refusé.' }, 401) };
+    if (!allow(`mcp:${token.id}`, 180, 60_000))
+      return { error: c.json({ error: 'Trop de signalements.' }, 429) };
+    await touchToken(options.db, token.id, now());
+    return { token };
+  };
+
+  app.get('/api/v1/ping', async (c) => {
+    const auth = await botAuth(c);
+    if ('error' in auth) return auth.error;
+    publish(auth.token.userId, 'connection.used');
+    return c.json({
+      ok: true,
+      service: 'bot-cockpit',
+      version: APP_VERSION,
+      token: auth.token.label,
+    });
+  });
+
+  app.post('/api/v1/report', async (c) => {
+    const auth = await botAuth(c);
+    if ('error' in auth) return auth.error;
+    const parsed = reportSchema.safeParse(await readJson(c));
+    if (!parsed.success)
+      return c.json({ error: 'Corps invalide : bot_id requis, plus status ou name.' }, 400);
+    const args = parsed.data;
+    if (!args.status && !args.name)
+      return c.json({ error: 'Indiquez status (statut) ou name (événement).' }, 400);
+    const ownerId = auth.token.userId;
+    const result = await recordSignal(
+      options.db,
+      ownerId,
+      args.status
+        ? {
+            kind: 'status',
+            botKey: args.bot_id,
+            status: args.status,
+            name: 'statut',
+            detail: args.note ?? args.detail ?? '',
+            source: args.source ?? 'bot',
+            occurredAt: resolveOccurred(args.occurred_at, now()),
+            tokens: null,
+          }
+        : {
+            kind: 'event',
+            botKey: args.bot_id,
+            name: args.name ?? 'evenement',
+            detail: args.detail ?? args.note ?? '',
+            source: args.source ?? 'bot',
+            occurredAt: resolveOccurred(args.occurred_at, now()),
+            tokens: cleanTokens(args.tokens),
+          },
+      now(),
+    );
+    await addAudit(
+      options.db,
+      ownerId,
+      `rest:${auth.token.id}`,
+      args.status ? 'rest.status' : 'rest.event',
+      result.message,
+      now(),
+    );
+    publish(ownerId, 'event.created');
+    publish(ownerId, 'connection.used');
+    if (args.status || result.linked) publish(ownerId, 'bot.updated');
+    return c.json({ ok: true, ...result }, result.duplicate ? 200 : 201);
+  });
+
   app.use('/api/*', async (c, next) => {
     if (c.req.path === '/api/health' || c.req.path === '/api/bootstrap') return next();
+    if (c.req.path.startsWith('/api/v1/')) return c.json({ error: 'Introuvable.' }, 404);
     const method = c.req.method.toUpperCase();
     if (!['GET', 'HEAD'].includes(method) && c.req.header('x-bot-cockpit') !== '1') {
       return c.json({ error: 'En-tête de confirmation manquant.' }, 403);
@@ -806,6 +911,39 @@ export function createApp(options: AppOptions) {
     });
   });
 
+  app.get('/api/onboarding', async (c) => {
+    const user = requireUser(c);
+    return c.json(await readOnboarding(options.db, user.id, now()));
+  });
+
+  app.put('/api/onboarding', async (c) => {
+    const user = requireUser(c);
+    const body = await readJson(c);
+    return c.json(
+      await updateOnboarding(options.db, user.id, { step: body.step, status: body.status }, now()),
+    );
+  });
+
+  app.post('/api/onboarding/restart', async (c) => {
+    const user = requireUser(c);
+    return c.json(await restartOnboarding(options.db, user.id, user.email, now()));
+  });
+
+  app.post('/api/onboarding/token', async (c) => {
+    const user = requireUser(c);
+    const minted = newSecret('bc_');
+    const id = await rotateOnboardingToken(options.db, user.id, minted, user.email, now());
+    return c.json(
+      {
+        id,
+        hint: minted.hint,
+        token: minted.secret,
+        state: await readOnboarding(options.db, user.id, now()),
+      },
+      201,
+    );
+  });
+
   app.get('/api/tokens', async (c) => {
     const user = requireUser(c);
     return c.json(await listTokens(options.db, user.id));
@@ -1016,6 +1154,7 @@ export function createApp(options: AppOptions) {
       return c.json({ error: 'Trop de signalements.' }, 429);
     mcpOwners.set(token.id, token.userId);
     await touchToken(options.db, token.id, now());
+    publish(token.userId, 'connection.used');
     return mcp.fetch(c.req.raw, {
       authInfo: { token: 'present', clientId: token.id, scopes: ['report'] },
     });
